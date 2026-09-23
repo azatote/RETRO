@@ -28,4 +28,9 @@ create policy "Anyone can move retro tickets"
   using (true)
   with check (true);
 
+create policy "Anyone can reset retro tickets"
+  on public.retro_tickets for delete
+  to anon, authenticated
+  using (true);
+
 alter publication supabase_realtime add table public.retro_tickets;

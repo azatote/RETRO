@@ -42,7 +42,7 @@ function App() {
     let active = true
     const loadTickets = async () => {
       const { data } = await client.from('retro_tickets').select('*').eq('session_id', sessionId).order('created_at')
-      if (active && data?.length) setTickets(data.map(toTicket))
+      if (active && data) setTickets(data.map(toTicket))
     }
     void loadTickets()
     const channel = client.channel(`retro-${sessionId}`, { config: { presence: { key: displayName } } })
@@ -58,6 +58,9 @@ function App() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const ticket = toTicket(payload.new as RemoteTicket)
         setTickets((current) => current.map((item) => item.id === ticket.id ? ticket : item))
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
+        setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') await channel.track({ user: displayName, isAdmin })
@@ -102,6 +105,21 @@ function App() {
     setBackground(imageUrl)
   }
 
+  const resetSession = async () => {
+    if (!isAdmin || !window.confirm('Réinitialiser les tickets de cette rétro pour tout le monde ?')) return
+    setRevealAll(false)
+    if (supabase) {
+      const { error } = await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
+      if (error) {
+        window.alert('La réinitialisation est bloquée par les droits Supabase. Exécutez la policy DELETE du fichier supabase-schema.sql.')
+        return
+      }
+    } else {
+      setTickets([])
+    }
+    setTickets([])
+  }
+
   if (!joined) {
     return <main className="login-page"><div className="login-card"><div className="logo-mark">R</div><p className="eyebrow">Rétro visuelle collaborative</p><h1>Construisons la carte de votre équipe.</h1><p className="login-copy">Choisissez un pseudo pour rejoindre l’espace de travail. Vos tickets peuvent rester secrets jusqu’au moment de les partager.</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && joinSession()} placeholder="Ex. Camille · @animateur" maxLength={24} /><p className="pseudo-hint">Préfixez votre pseudo avec <strong>@</strong> pour devenir l’animateur de la réunion.</p><button className="primary-button full" onClick={joinSession} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim())}>Entrer dans la rétro <span>→</span></button><span className="privacy-note">🔒 {isSupabaseConfigured ? 'Session temps réel activée' : 'Mode local · ajoutez Supabase pour le temps réel'}</span></div></main>
   }
@@ -119,7 +137,7 @@ function App() {
         <button className="primary-button full" onClick={addTicket} disabled={!draft.trim()}>+ Créer le ticket</button>
         <div className="side-divider" />
         <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
-        {isAdmin ? <button className="reveal-button" onClick={() => setRevealAll((value) => !value)}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button> : <p className="admin-note">🔒 Seul l’animateur peut révéler tous les tickets.</p>}
+        {isAdmin ? <><button className="reveal-button" onClick={() => setRevealAll((value) => !value)}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler ou réinitialiser la rétro.</p>}
       </aside>
       <section className="board-area"><div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><label className="image-button">▧ Changer l’image<input type="file" accept="image/*" onChange={handleImage} /></label><button className="icon-button" aria-label="Partager la session">⌁</button></div></div><div className="image-board custom-image" style={{ backgroundImage: `url(${background})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}><div className="board-caption"><span>GLISSEZ LES TICKETS SUR L’IMAGE</span><small>Tout le monde voit la même carte</small></div>{tickets.map((ticket) => { const hidden = ticket.private && ticket.author !== displayName && !revealAll; return <div className={`ticket ${hidden ? 'is-hidden' : ''}`} draggable onDragStart={() => setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}><div className="ticket-pin" />{hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : <><p>{ticket.text}</p><small>{ticket.author} {ticket.author === displayName ? '· vous' : ''}</small></>}</div> })}</div><div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>Déplacez les tickets par glisser-déposer</span></div></section>
     </div>
