@@ -30,6 +30,7 @@ function App() {
   const [revealAll, setRevealAll] = useState(false)
   const [draggedId, setDraggedId] = useState<number | string | null>(null)
   const [onlineUsers, setOnlineUsers] = useState<string[]>([])
+  const [ticketError, setTicketError] = useState('')
   const normalizedPseudo = pseudo.trim()
   const isAdmin = normalizedPseudo.startsWith('@')
   const displayName = normalizedPseudo.replace(/^@/, '')
@@ -79,13 +80,21 @@ function App() {
     const text = draft.trim()
     if (!text || !displayName) return
     const ticket = { text, author: displayName, color: selectedColor, x: 42, y: 44, private: isPrivate }
-    if (supabase) {
-      const { data } = await supabase.from('retro_tickets').insert({ session_id: sessionId, text: ticket.text, author: ticket.author, color: ticket.color, x: ticket.x, y: ticket.y, is_private: ticket.private }).select().single()
-      if (data) setTickets((current) => [...current, toTicket(data as RemoteTicket)])
-    } else {
-      setTickets((current) => [...current, { id: Date.now(), ...ticket }])
-    }
+    const temporaryId = `pending-${Date.now()}`
+    setTicketError('')
+    setTickets((current) => [...current, { id: temporaryId, ...ticket }])
     setDraft('')
+    if (supabase) {
+      const { data, error } = await supabase.from('retro_tickets').insert({ session_id: sessionId, text: ticket.text, author: ticket.author, color: ticket.color, x: ticket.x, y: ticket.y, is_private: ticket.private }).select().single()
+      if (error || !data) {
+        setTickets((current) => current.filter((item) => item.id !== temporaryId))
+        setTicketError(error?.message ?? 'Le ticket n’a pas pu être enregistré.')
+        return
+      }
+      setTickets((current) => current.map((item) => item.id === temporaryId ? toTicket(data as RemoteTicket) : item))
+    } else {
+      setTickets((current) => current.map((item) => item.id === temporaryId ? { id: Date.now(), ...ticket } : item))
+    }
   }
 
   const moveTicket = (event: DragEvent<HTMLDivElement>) => {
@@ -134,7 +143,7 @@ function App() {
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Une idée, un ressenti, un fait..." rows={4} maxLength={160} />
         <div className="compose-row"><div className="swatches">{colors.map((color) => <button aria-label={`Couleur ${color}`} className={selectedColor === color ? 'swatch selected' : 'swatch'} key={color} style={{ background: color }} onClick={() => setSelectedColor(color)} />)}</div><span className="char-count">{draft.length}/160</span></div>
         <label className="private-toggle"><input type="checkbox" checked={isPrivate} onChange={(event) => setIsPrivate(event.target.checked)} /><span className="fake-check">{isPrivate ? '✓' : ''}</span><span><strong>Ticket privé</strong><small>Révélez-le quand vous êtes prêt</small></span></label>
-        <button className="primary-button full" onClick={addTicket} disabled={!draft.trim()}>+ Créer le ticket</button>
+        <button className="primary-button full" onClick={addTicket} disabled={!draft.trim()}>+ Créer le ticket</button>{ticketError && <p className="ticket-error">Impossible d’enregistrer le ticket : {ticketError}</p>}
         <div className="side-divider" />
         <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
         {isAdmin ? <><button className="reveal-button" onClick={() => setRevealAll((value) => !value)}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler ou réinitialiser la rétro.</p>}
