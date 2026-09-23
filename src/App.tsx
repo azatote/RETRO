@@ -6,6 +6,7 @@ import './App.css'
 
 type Ticket = { id: number | string; text: string; author: string; color: string; x: number; y: number; private: boolean }
 type RemoteTicket = { id: number; text: string; author: string; color: string; x: number; y: number; is_private: boolean }
+type PresenceUser = { user: string; isAdmin: boolean }
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const starterTickets: Ticket[] = [
@@ -28,12 +29,15 @@ function App() {
   const [background, setBackground] = useState(backgroundImage)
   const [revealAll, setRevealAll] = useState(false)
   const [draggedId, setDraggedId] = useState<number | string | null>(null)
+  const [onlineUsers, setOnlineUsers] = useState<string[]>([])
   const normalizedPseudo = pseudo.trim()
   const isAdmin = normalizedPseudo.startsWith('@')
   const displayName = normalizedPseudo.replace(/^@/, '')
+  const visibleOnlineUsers = isSupabaseConfigured ? onlineUsers : (displayName ? [displayName] : [])
 
   useEffect(() => {
     const client = supabase
+    if (!joined || !displayName) return
     if (!client) return
     let active = true
     const loadTickets = async () => {
@@ -41,7 +45,12 @@ function App() {
       if (active && data?.length) setTickets(data.map(toTicket))
     }
     void loadTickets()
-    const channel = client.channel(`retro-${sessionId}`)
+    const channel = client.channel(`retro-${sessionId}`, { config: { presence: { key: displayName } } })
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState<PresenceUser>()
+        const names = Object.values(state).flatMap((entries) => entries.map((entry) => entry.user)).filter(Boolean)
+        if (active) setOnlineUsers([...new Set(names)])
+      })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const ticket = toTicket(payload.new as RemoteTicket)
         setTickets((current) => current.some((item) => item.id === ticket.id) ? current : [...current, ticket])
@@ -50,9 +59,11 @@ function App() {
         const ticket = toTicket(payload.new as RemoteTicket)
         setTickets((current) => current.map((item) => item.id === ticket.id ? ticket : item))
       })
-      .subscribe()
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') await channel.track({ user: displayName, isAdmin })
+      })
     return () => { active = false; void client.removeChannel(channel) }
-  }, [])
+  }, [joined, displayName, isAdmin])
 
   const joinSession = () => {
     const value = pseudo.trim()
@@ -100,6 +111,7 @@ function App() {
     <div className="workspace-layout">
       <aside className="sidebar">
         <div className="side-heading"><div><p className="eyebrow">Espace de travail</p><h2>Vos tickets</h2></div><span className="ticket-count">{tickets.length}</span></div>
+        <div className="online-panel"><div className="online-heading"><span><i className="live-dot" /> Dans la rétro</span><strong>{visibleOnlineUsers.length}</strong></div><div className="online-list">{visibleOnlineUsers.map((user) => <span className={user === displayName ? 'online-user current' : 'online-user'} key={user}><i />{user}{user === displayName && <small>vous</small>}</span>)}</div></div>
         <p className="side-help">Écrivez ce que vous voulez déposer sur la carte. Les tickets privés ne sont visibles que par vous.</p>
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Une idée, un ressenti, un fait..." rows={4} maxLength={160} />
         <div className="compose-row"><div className="swatches">{colors.map((color) => <button aria-label={`Couleur ${color}`} className={selectedColor === color ? 'swatch selected' : 'swatch'} key={color} style={{ background: color }} onClick={() => setSelectedColor(color)} />)}</div><span className="char-count">{draft.length}/160</span></div>
