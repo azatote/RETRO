@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent } from 'react'
+import type { RealtimeChannel } from '@supabase/supabase-js'
 import backgroundImage from './assets/heart-of-the-team.png'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import './App.css'
@@ -31,6 +32,7 @@ function App() {
   const [draggedId, setDraggedId] = useState<number | string | null>(null)
   const [onlineUsers, setOnlineUsers] = useState<string[]>([])
   const [ticketError, setTicketError] = useState('')
+  const channelRef = useRef<RealtimeChannel | null>(null)
   const normalizedPseudo = pseudo.trim()
   const isAdmin = normalizedPseudo.startsWith('@')
   const displayName = normalizedPseudo.replace(/^@/, '')
@@ -52,6 +54,10 @@ function App() {
         const names = Object.values(state).flatMap((entries) => entries.map((entry) => entry.user)).filter(Boolean)
         if (active) setOnlineUsers([...new Set(names)])
       })
+      .on('broadcast', { event: 'ticket-moved' }, ({ payload }) => {
+        const { id, x, y } = payload as { id: number; x: number; y: number }
+        setTickets((current) => current.map((item) => item.id === id ? { ...item, x, y } : item))
+      })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const ticket = toTicket(payload.new as RemoteTicket)
         setTickets((current) => current.some((item) => item.id === ticket.id) ? current : [...current, ticket])
@@ -64,9 +70,12 @@ function App() {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
       .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') await channel.track({ user: displayName, isAdmin })
+        if (status === 'SUBSCRIBED') {
+          channelRef.current = channel
+          await channel.track({ user: displayName, isAdmin })
+        }
       })
-    return () => { active = false; void client.removeChannel(channel) }
+    return () => { active = false; channelRef.current = null; void client.removeChannel(channel) }
   }, [joined, displayName, isAdmin])
 
   const joinSession = () => {
@@ -104,7 +113,10 @@ function App() {
     const x = Math.max(4, Math.min(84, ((event.clientX - board.left) / board.width) * 100 - 8))
     const y = Math.max(4, Math.min(82, ((event.clientY - board.top) / board.height) * 100 - 7))
     setTickets((current) => current.map((ticket) => ticket.id === draggedId ? { ...ticket, x, y } : ticket))
-    if (supabase && typeof draggedId === 'number') void supabase.from('retro_tickets').update({ x, y }).eq('id', draggedId)
+    if (supabase && typeof draggedId === 'number') {
+      void channelRef.current?.send({ type: 'broadcast', event: 'ticket-moved', payload: { id: draggedId, x, y } })
+      void supabase.from('retro_tickets').update({ x, y }).eq('id', draggedId)
+    }
   }
 
   const handleImage = (event: ChangeEvent<HTMLInputElement>) => {
