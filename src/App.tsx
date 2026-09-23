@@ -55,8 +55,8 @@ function App() {
         if (active) setOnlineUsers([...new Set(names)])
       })
       .on('broadcast', { event: 'ticket-moved' }, ({ payload }) => {
-        const { id, x, y } = payload as { id: number; x: number; y: number }
-        setTickets((current) => current.map((item) => item.id === id ? { ...item, x, y } : item))
+        const { id, author, x, y } = payload as { id: number; author: string; x: number; y: number }
+        setTickets((current) => current.map((item) => item.id === id && item.author === author ? { ...item, x, y } : item))
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const ticket = toTicket(payload.new as RemoteTicket)
@@ -109,12 +109,14 @@ function App() {
   const moveTicket = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     if (draggedId === null) return
+    const draggedTicket = tickets.find((ticket) => ticket.id === draggedId)
+    if (!draggedTicket || draggedTicket.author !== displayName) return
     const board = event.currentTarget.getBoundingClientRect()
     const x = Math.max(4, Math.min(84, ((event.clientX - board.left) / board.width) * 100 - 8))
     const y = Math.max(4, Math.min(82, ((event.clientY - board.top) / board.height) * 100 - 7))
     setTickets((current) => current.map((ticket) => ticket.id === draggedId ? { ...ticket, x, y } : ticket))
     if (supabase && typeof draggedId === 'number') {
-      void channelRef.current?.send({ type: 'broadcast', event: 'ticket-moved', payload: { id: draggedId, x, y } })
+      void channelRef.current?.send({ type: 'broadcast', event: 'ticket-moved', payload: { id: draggedId, author: displayName, x, y } })
       void supabase.from('retro_tickets').update({ x, y }).eq('id', draggedId)
     }
   }
@@ -160,7 +162,7 @@ function App() {
         <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
         {isAdmin ? <><button className="reveal-button" onClick={() => setRevealAll((value) => !value)}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler ou réinitialiser la rétro.</p>}
       </aside>
-      <section className="board-area"><div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><label className="image-button">▧ Changer l’image<input type="file" accept="image/*" onChange={handleImage} /></label><button className="icon-button" aria-label="Partager la session">⌁</button></div></div><div className="image-board custom-image" style={{ backgroundImage: `url(${background})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}><div className="board-caption"><span>GLISSEZ LES TICKETS SUR L’IMAGE</span><small>Tout le monde voit la même carte</small></div>{tickets.map((ticket) => { const hidden = ticket.private && ticket.author !== displayName && !revealAll; return <div className={`ticket ${hidden ? 'is-hidden' : ''}`} draggable onDragStart={() => setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}><div className="ticket-pin" />{hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : <><p>{ticket.text}</p><small>{ticket.author} {ticket.author === displayName ? '· vous' : ''}</small></>}</div> })}</div><div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>Déplacez les tickets par glisser-déposer</span></div></section>
+      <section className="board-area"><div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><label className="image-button">▧ Changer l’image<input type="file" accept="image/*" onChange={handleImage} /></label><button className="icon-button" aria-label="Partager la session">⌁</button></div></div><div className="image-board custom-image" style={{ backgroundImage: `url(${background})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}><div className="board-caption"><span>GLISSEZ VOS TICKETS SUR L’IMAGE</span><small>Chaque ticket reste déplaçable par son auteur uniquement</small></div>{tickets.map((ticket) => { const hidden = ticket.private && ticket.author !== displayName && !revealAll; const canMove = ticket.author === displayName; return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'}`} draggable={canMove} onDragStart={() => canMove && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}><div className="ticket-pin" />{hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small></>}</div> })}</div><div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>Déplacez uniquement vos tickets</span></div></section>
     </div>
   </main>
 }
