@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ChangeEvent, DragEvent } from 'react'
+import type { DragEvent } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import backgroundImage from './assets/heart-of-the-team.png'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
@@ -8,6 +8,7 @@ import './App.css'
 type Ticket = { id: number | string; text: string; author: string; color: string; x: number; y: number; private: boolean }
 type RemoteTicket = { id: number; text: string; author: string; color: string; x: number; y: number; is_private: boolean }
 type PresenceUser = { user: string; isAdmin: boolean }
+type Sticker = { id: string; author: string; color: string; ticketId: number | string }
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const starterTickets: Ticket[] = [
@@ -16,6 +17,7 @@ const starterTickets: Ticket[] = [
   { id: 3, text: 'Les échanges entre équipes nous ont aidés', author: 'Lina', color: colors[2], x: 70, y: 18, private: false },
 ]
 const sessionId = 'demo'
+const stickerColors = ['#ffd166', '#ff8b8b', '#79d5bd', '#9fb7ff']
 
 const toTicket = (ticket: RemoteTicket): Ticket => ({ id: ticket.id, text: ticket.text, author: ticket.author, color: ticket.color, x: ticket.x, y: ticket.y, private: ticket.is_private })
 
@@ -39,6 +41,8 @@ function App() {
   const [draggedId, setDraggedId] = useState<number | string | null>(null)
   const [onlineUsers, setOnlineUsers] = useState<string[]>([])
   const [ticketError, setTicketError] = useState('')
+  const [ticketsLocked, setTicketsLocked] = useState(false)
+  const [stickers, setStickers] = useState<Sticker[]>([])
   const [editingTicketId, setEditingTicketId] = useState<number | string | null>(null)
   const [editingText, setEditingText] = useState('')
   const channelRef = useRef<RealtimeChannel | null>(null)
@@ -69,6 +73,13 @@ function App() {
       })
       .on('broadcast', { event: 'visibility-changed' }, ({ payload }) => {
         setRevealAll(Boolean((payload as { revealAll: boolean }).revealAll))
+      })
+      .on('broadcast', { event: 'tickets-locked' }, ({ payload }) => {
+        setTicketsLocked(Boolean((payload as { locked: boolean }).locked))
+      })
+      .on('broadcast', { event: 'sticker-placed' }, ({ payload }) => {
+        const sticker = payload as Sticker
+        setStickers((current) => current.some((item) => item.id === sticker.id) ? current : [...current, sticker])
       })
       .on('broadcast', { event: 'ticket-edited' }, ({ payload }) => {
         const { id, author, text } = payload as { id: number; author: string; text: string }
@@ -102,6 +113,7 @@ function App() {
   }
 
   const addTicket = async () => {
+    if (ticketsLocked) return
     const text = draft.trim()
     if (!text || !displayName) return
     const authorTicketCount = tickets.filter((ticket) => ticket.author === displayName).length
@@ -126,7 +138,7 @@ function App() {
 
   const moveTicket = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    if (draggedId === null) return
+    if (draggedId === null || ticketsLocked) return
     const draggedTicket = tickets.find((ticket) => ticket.id === draggedId)
     if (!draggedTicket || draggedTicket.author !== displayName) return
     const board = event.currentTarget.getBoundingClientRect()
@@ -137,6 +149,37 @@ function App() {
       void channelRef.current?.send({ type: 'broadcast', event: 'ticket-moved', payload: { id: draggedId, author: displayName, x, y } })
       void supabase.from('retro_tickets').update({ x, y }).eq('id', draggedId)
     }
+  }
+
+  const toggleTicketsLocked = () => {
+    if (!isAdmin) return
+    const nextValue = !ticketsLocked
+    setTicketsLocked(nextValue)
+    void channelRef.current?.send({ type: 'broadcast', event: 'tickets-locked', payload: { locked: nextValue } })
+  }
+
+  const startStickerDrag = (event: DragEvent<HTMLButtonElement>, color: string) => {
+    event.dataTransfer.setData('application/retro-sticker', color)
+  }
+
+  const dropSticker = (event: DragEvent<HTMLDivElement>, ticketId: number | string) => {
+    event.preventDefault()
+    const color = event.dataTransfer.getData('application/retro-sticker')
+    if (!color || ticketsLocked || stickers.filter((sticker) => sticker.author === displayName).length >= 3) return
+    const sticker: Sticker = { id: `${displayName}-${Date.now()}`, author: displayName, color, ticketId }
+    setStickers((current) => [...current, sticker])
+    void channelRef.current?.send({ type: 'broadcast', event: 'sticker-placed', payload: sticker })
+  }
+
+  const downloadMarkdown = () => {
+    const lines = [`# ${sessionName}`, '', `Session: ${sessionId}`, `Exportée le : ${new Date().toLocaleString('fr-FR')}`, '', '## Tickets', ...tickets.map((ticket) => `- **${ticket.text}** — ${ticket.author}${ticket.private ? ' (privé)' : ''}`), '', '## Votes par gommettes', ...tickets.map((ticket) => `- ${ticket.text} : ${stickers.filter((sticker) => sticker.ticketId === ticket.id).length} gommette(s)`), '']
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${sessionName.toLowerCase().replace(/[^a-z0-9]+/gi, '-')}.md`
+    link.click()
+    URL.revokeObjectURL(url)
   }
 
   const beginEdit = (ticket: Ticket) => {
@@ -155,13 +198,6 @@ function App() {
       const { error } = await supabase.from('retro_tickets').update({ text }).eq('id', ticket.id).eq('author', displayName)
       if (error) setTicketError(error.message)
     }
-  }
-
-  const handleImage = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    const imageUrl = URL.createObjectURL(file)
-    setBackground(imageUrl)
   }
 
   const resetSession = async () => {
@@ -199,12 +235,13 @@ function App() {
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Une idée, un ressenti, un fait..." rows={4} maxLength={160} />
         <div className="compose-row"><div className="swatches">{colors.map((color) => <button aria-label={`Couleur ${color}`} className={selectedColor === color ? 'swatch selected' : 'swatch'} key={color} style={{ background: color }} onClick={() => setSelectedColor(color)} />)}</div><span className="char-count">{draft.length}/160</span></div>
         <label className="private-toggle"><input type="checkbox" checked={isPrivate} onChange={(event) => setIsPrivate(event.target.checked)} /><span className="fake-check">{isPrivate ? '✓' : ''}</span><span><strong>Ticket privé</strong><small>Révélez-le quand vous êtes prêt</small></span></label>
-        <button className="primary-button full" onClick={addTicket} disabled={!draft.trim()}>+ Créer le ticket</button>{ticketError && <p className="ticket-error">Impossible d’enregistrer le ticket : {ticketError}</p>}
+        <button className="primary-button full" onClick={addTicket} disabled={!draft.trim() || ticketsLocked}>+ Créer le ticket</button>{ticketError && <p className="ticket-error">Impossible d’enregistrer le ticket : {ticketError}</p>}
+        <div className="vote-panel"><strong>{ticketsLocked ? 'Phase 2 · Vote par gommettes' : 'Phase 1 · Collecte'}</strong><small>{ticketsLocked ? 'Glissez vos gommettes sur les tickets.' : 'L’animateur verrouille les tickets pour lancer le vote.'}</small>{ticketsLocked && <div className="sticker-palette">{stickerColors.map((color) => <button key={color} draggable onDragStart={(event) => startStickerDrag(event, color)} className="sticker-token" style={{ background: color }} aria-label="Gommette à déplacer" />)}</div>}</div>
         <div className="side-divider" />
         <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
-        {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler ou réinitialiser la rétro.</p>}
+        {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button><button className="reveal-button" onClick={toggleTicketsLocked}>{ticketsLocked ? 'Déverrouiller les tickets' : 'Verrouiller les tickets'} <span>{ticketsLocked ? '🔓' : '🔒'}</span></button><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, verrouiller ou réinitialiser la rétro.</p>}
       </aside>
-      <section className="board-area"><div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><label className="image-button">▧ Changer l’image<input type="file" accept="image/*" onChange={handleImage} /></label><button className="icon-button" aria-label="Partager la session">⌁</button></div></div><div className="image-board custom-image" style={{ backgroundImage: `url(${background})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}><div className="board-caption"><span>GLISSEZ VOS TICKETS SUR L’IMAGE</span><small>Chaque ticket reste déplaçable par son auteur uniquement</small></div>{tickets.map((ticket) => { const hidden = ticket.private && ticket.author !== displayName && !revealAll; const canMove = ticket.author === displayName; const canEdit = canMove && ticket.private && !revealAll; const isEditing = editingTicketId === ticket.id; return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}><div className="ticket-pin" />{hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}</>}</div> })}</div><div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>Déplacez uniquement vos tickets</span></div></section>
+      <section className="board-area"><div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><button className="icon-button" aria-label="Partager la session">⌁</button></div></div><div className="image-board custom-image" style={{ backgroundImage: `url(${background})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}><div className="board-caption"><span>{ticketsLocked ? 'DÉPLACEZ VOS GOMMETTES SUR LES TICKETS' : 'GLISSEZ VOS TICKETS SUR L’IMAGE'}</span><small>{ticketsLocked ? 'Chaque utilisateur dispose de 3 gommettes.' : 'Chaque ticket reste déplaçable par son auteur uniquement'}</small></div>{tickets.map((ticket) => { const hidden = ticket.private && ticket.author !== displayName && !revealAll; const canMove = ticket.author === displayName; const canEdit = canMove && ticket.private && !revealAll; const isEditing = editingTicketId === ticket.id; const ticketStickers = stickers.filter((sticker) => sticker.ticketId === ticket.id); return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'}`} draggable={canMove && !isEditing && !ticketsLocked} onDragOver={(event) => ticketsLocked && event.preventDefault()} onDrop={(event) => dropSticker(event, ticket.id)} onDragStart={() => canMove && !isEditing && !ticketsLocked && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}><div className="ticket-pin" />{hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{ticketStickers.map((sticker) => <span className="placed-sticker" key={sticker.id} style={{ background: sticker.color }} title={`Gommette de ${sticker.author}`} />)}</>}</div> })}</div><div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>{ticketsLocked ? 'Votez avec vos gommettes' : 'Déplacez uniquement vos tickets'}</span></div></section>
     </div>
   </main>
 }
