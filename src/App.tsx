@@ -19,6 +19,13 @@ const sessionId = 'demo'
 
 const toTicket = (ticket: RemoteTicket): Ticket => ({ id: ticket.id, text: ticket.text, author: ticket.author, color: ticket.color, x: ticket.x, y: ticket.y, private: ticket.is_private })
 
+const getAuthorPlacement = (author: string, ticketNumber: number) => {
+  const authorHash = [...author].reduce((total, character) => total + character.charCodeAt(0), 0)
+  const x = 10 + ((authorHash * 17 + ticketNumber * 23) % 76)
+  const y = 12 + ((authorHash * 11 + ticketNumber * 19) % 72)
+  return { x, y }
+}
+
 function App() {
   const [pseudo, setPseudo] = useState('')
   const [joined, setJoined] = useState(false)
@@ -91,8 +98,9 @@ function App() {
   const addTicket = async () => {
     const text = draft.trim()
     if (!text || !displayName) return
-    const placementIndex = tickets.length
-    const ticket = { text, author: displayName, color: selectedColor, x: 16 + ((placementIndex * 29) % 68), y: 18 + ((placementIndex * 23) % 62), private: isPrivate }
+    const authorTicketCount = tickets.filter((ticket) => ticket.author === displayName).length
+    const placement = getAuthorPlacement(displayName, authorTicketCount)
+    const ticket = { text, author: displayName, color: selectedColor, ...placement, private: isPrivate }
     const temporaryId = `pending-${Date.now()}`
     setTicketError('')
     setTickets((current) => [...current, { id: temporaryId, ...ticket }])
