@@ -39,6 +39,8 @@ function App() {
   const [draggedId, setDraggedId] = useState<number | string | null>(null)
   const [onlineUsers, setOnlineUsers] = useState<string[]>([])
   const [ticketError, setTicketError] = useState('')
+  const [editingTicketId, setEditingTicketId] = useState<number | string | null>(null)
+  const [editingText, setEditingText] = useState('')
   const channelRef = useRef<RealtimeChannel | null>(null)
   const normalizedPseudo = pseudo.trim()
   const isAdmin = normalizedPseudo.startsWith('@')
@@ -67,6 +69,10 @@ function App() {
       })
       .on('broadcast', { event: 'visibility-changed' }, ({ payload }) => {
         setRevealAll(Boolean((payload as { revealAll: boolean }).revealAll))
+      })
+      .on('broadcast', { event: 'ticket-edited' }, ({ payload }) => {
+        const { id, author, text } = payload as { id: number; author: string; text: string }
+        setTickets((current) => current.map((item) => item.id === id && item.author === author ? { ...item, text } : item))
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const ticket = toTicket(payload.new as RemoteTicket)
@@ -133,6 +139,24 @@ function App() {
     }
   }
 
+  const beginEdit = (ticket: Ticket) => {
+    if (ticket.author !== displayName || !ticket.private || revealAll) return
+    setEditingTicketId(ticket.id)
+    setEditingText(ticket.text)
+  }
+
+  const saveEdit = async (ticket: Ticket) => {
+    const text = editingText.trim()
+    if (!text || ticket.author !== displayName || !ticket.private || revealAll) return
+    setTickets((current) => current.map((item) => item.id === ticket.id ? { ...item, text } : item))
+    setEditingTicketId(null)
+    if (supabase && typeof ticket.id === 'number') {
+      void channelRef.current?.send({ type: 'broadcast', event: 'ticket-edited', payload: { id: ticket.id, author: displayName, text } })
+      const { error } = await supabase.from('retro_tickets').update({ text }).eq('id', ticket.id).eq('author', displayName)
+      if (error) setTicketError(error.message)
+    }
+  }
+
   const handleImage = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -180,7 +204,7 @@ function App() {
         <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
         {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler ou réinitialiser la rétro.</p>}
       </aside>
-      <section className="board-area"><div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><label className="image-button">▧ Changer l’image<input type="file" accept="image/*" onChange={handleImage} /></label><button className="icon-button" aria-label="Partager la session">⌁</button></div></div><div className="image-board custom-image" style={{ backgroundImage: `url(${background})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}><div className="board-caption"><span>GLISSEZ VOS TICKETS SUR L’IMAGE</span><small>Chaque ticket reste déplaçable par son auteur uniquement</small></div>{tickets.map((ticket) => { const hidden = ticket.private && ticket.author !== displayName && !revealAll; const canMove = ticket.author === displayName; return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'}`} draggable={canMove} onDragStart={() => canMove && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}><div className="ticket-pin" />{hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small></>}</div> })}</div><div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>Déplacez uniquement vos tickets</span></div></section>
+      <section className="board-area"><div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><label className="image-button">▧ Changer l’image<input type="file" accept="image/*" onChange={handleImage} /></label><button className="icon-button" aria-label="Partager la session">⌁</button></div></div><div className="image-board custom-image" style={{ backgroundImage: `url(${background})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}><div className="board-caption"><span>GLISSEZ VOS TICKETS SUR L’IMAGE</span><small>Chaque ticket reste déplaçable par son auteur uniquement</small></div>{tickets.map((ticket) => { const hidden = ticket.private && ticket.author !== displayName && !revealAll; const canMove = ticket.author === displayName; const canEdit = canMove && ticket.private && !revealAll; const isEditing = editingTicketId === ticket.id; return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}><div className="ticket-pin" />{hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}</>}</div> })}</div><div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>Déplacez uniquement vos tickets</span></div></section>
     </div>
   </main>
 }
