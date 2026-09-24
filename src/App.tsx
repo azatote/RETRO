@@ -36,7 +36,7 @@ function App() {
   const [draft, setDraft] = useState('')
   const [isPrivate, setIsPrivate] = useState(true)
   const [selectedColor, setSelectedColor] = useState(colors[0])
-  const [background, setBackground] = useState(backgroundImage)
+  const [background] = useState(backgroundImage)
   const [revealAll, setRevealAll] = useState(false)
   const [draggedId, setDraggedId] = useState<number | string | null>(null)
   const [onlineUsers, setOnlineUsers] = useState<string[]>([])
@@ -166,7 +166,7 @@ function App() {
     event.preventDefault()
     const color = event.dataTransfer.getData('application/retro-sticker')
     if (!color || ticketsLocked || stickers.filter((sticker) => sticker.author === displayName).length >= 3) return
-    const sticker: Sticker = { id: `${displayName}-${Date.now()}`, author: displayName, color, ticketId }
+    const sticker: Sticker = { id: `${displayName}-${crypto.randomUUID()}`, author: displayName, color, ticketId }
     setStickers((current) => [...current, sticker])
     void channelRef.current?.send({ type: 'broadcast', event: 'sticker-placed', payload: sticker })
   }
