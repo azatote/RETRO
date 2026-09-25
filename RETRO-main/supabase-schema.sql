@@ -34,22 +34,11 @@ create table if not exists public.retro_votes (
 
 alter table public.retro_votes enable row level security;
 
-create policy "Anyone can read retro votes"
-  on public.retro_votes for select
-  to anon, authenticated
-  using (true);
-
-create policy "Anyone can create retro votes"
-  on public.retro_votes for insert
-  to anon, authenticated
-  with check (true);
-
-create policy "Anyone can remove own retro votes"
-  on public.retro_votes for delete
-  to anon, authenticated
-  using (true);
-
 alter table public.retro_sessions enable row level security;
+drop policy if exists "Anyone can read retro session configuration" on public.retro_sessions;
+drop policy if exists "Anyone can configure retro session" on public.retro_sessions;
+drop policy if exists "Anyone can update retro session" on public.retro_sessions;
+drop policy if exists "Anyone can reset retro session" on public.retro_sessions;
 
 create policy "Anyone can read retro session configuration"
   on public.retro_sessions for select
@@ -67,7 +56,19 @@ create policy "Anyone can update retro session"
   using (true)
   with check (true);
 
+create policy "Anyone can reset retro session"
+  on public.retro_sessions for delete
+  to anon, authenticated
+  using (true);
+
 alter table public.retro_tickets enable row level security;
+drop policy if exists "Anyone can read retro tickets" on public.retro_tickets;
+drop policy if exists "Anyone can create retro tickets" on public.retro_tickets;
+drop policy if exists "Anyone can move retro tickets" on public.retro_tickets;
+drop policy if exists "Anyone can reset retro tickets" on public.retro_tickets;
+drop policy if exists "Anyone can read retro votes" on public.retro_votes;
+drop policy if exists "Anyone can create retro votes" on public.retro_votes;
+drop policy if exists "Anyone can remove own retro votes" on public.retro_votes;
 
 create policy "Anyone can read retro tickets"
   on public.retro_tickets for select
@@ -90,6 +91,51 @@ create policy "Anyone can reset retro tickets"
   to anon, authenticated
   using (true);
 
-alter publication supabase_realtime add table public.retro_tickets;
-alter publication supabase_realtime add table public.retro_sessions;
-alter publication supabase_realtime add table public.retro_votes;
+create policy "Anyone can read retro votes"
+  on public.retro_votes for select
+  to anon, authenticated
+  using (true);
+
+create policy "Anyone can create retro votes"
+  on public.retro_votes for insert
+  to anon, authenticated
+  with check (true);
+
+create policy "Anyone can remove own retro votes"
+  on public.retro_votes for delete
+  to anon, authenticated
+  using (true);
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_rel pr
+    join pg_class c on c.oid = pr.prrelid
+    join pg_publication p on p.oid = pr.prpubid
+    where p.pubname = 'supabase_realtime' and c.oid = 'public.retro_tickets'::regclass
+  ) then
+    alter publication supabase_realtime add table public.retro_tickets;
+  end if;
+
+  if not exists (
+    select 1
+    from pg_publication_rel pr
+    join pg_class c on c.oid = pr.prrelid
+    join pg_publication p on p.oid = pr.prpubid
+    where p.pubname = 'supabase_realtime' and c.oid = 'public.retro_sessions'::regclass
+  ) then
+    alter publication supabase_realtime add table public.retro_sessions;
+  end if;
+
+  if not exists (
+    select 1
+    from pg_publication_rel pr
+    join pg_class c on c.oid = pr.prrelid
+    join pg_publication p on p.oid = pr.prpubid
+    where p.pubname = 'supabase_realtime' and c.oid = 'public.retro_votes'::regclass
+  ) then
+    alter publication supabase_realtime add table public.retro_votes;
+  end if;
+end
+$$;

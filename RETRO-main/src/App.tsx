@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
+import QRCode from 'qrcode'
 import backgroundImage from './assets/heart-of-the-team.png'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import './App.css'
@@ -39,7 +40,8 @@ const starterTickets: Ticket[] = [
   { id: 2, text: 'Les décisions importantes étaient parfois floues', author: 'Noé', color: colors[1], x: 48, y: 31, private: true },
   { id: 3, text: 'Les échanges entre équipes nous ont aidés', author: 'Lina', color: colors[2], x: 70, y: 18, private: false },
 ]
-const sessionId = 'demo'
+const createSessionKey = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()
+const initialSessionKey = new URLSearchParams(window.location.search).get('session') || 'DEMO'
 const defaultZones: Zone[] = [
   { id: 'keep', name: 'À conserver', color: '#9ee7d1' },
   { id: 'improve', name: 'À améliorer', color: '#ffd166' },
@@ -69,6 +71,7 @@ const getAuthorPlacement = (author: string, ticketNumber: number) => {
 function App() {
   const [pseudo, setPseudo] = useState('')
   const [joined, setJoined] = useState(false)
+  const [sessionId, setSessionId] = useState(initialSessionKey)
   const [sessionName, setSessionName] = useState('La carte de notre sprint')
   const [tickets, setTickets] = useState<Ticket[]>(starterTickets)
   const [draft, setDraft] = useState('')
@@ -87,11 +90,19 @@ function App() {
   const [ticketVotes, setTicketVotes] = useState<TicketVotes>({})
   const [editingTicketId, setEditingTicketId] = useState<number | string | null>(null)
   const [editingText, setEditingText] = useState('')
+  const [shareUrl, setShareUrl] = useState('')
+  const [qrCodeUrl, setQrCodeUrl] = useState('')
   const channelRef = useRef<RealtimeChannel | null>(null)
   const normalizedPseudo = pseudo.trim()
   const isAdmin = normalizedPseudo.startsWith('@')
   const displayName = normalizedPseudo.replace(/^@/, '')
   const visibleOnlineUsers = isSupabaseConfigured ? onlineUsers : (displayName ? [displayName] : [])
+
+  useEffect(() => {
+    const url = `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(sessionId)}`
+    setShareUrl(url)
+    void QRCode.toDataURL(url, { width: 220, margin: 2, color: { dark: '#17262a', light: '#fffdf8' } }).then(setQrCodeUrl)
+  }, [sessionId])
 
   useEffect(() => {
     const client = supabase
@@ -134,6 +145,17 @@ function App() {
         setVoteFinished(config.voteFinished)
         setTicketZones(config.ticketZones)
         setTicketActions(config.ticketActions ?? {})
+      })
+      .on('broadcast', { event: 'session-reset' }, ({ payload }) => {
+        const { sessionId: nextSessionId } = payload as { sessionId: string }
+        setTickets(starterTickets)
+        setTicketVotes({})
+        setTicketZones({})
+        setTicketActions({})
+        setVoteOpen(false)
+        setVoteFinished(false)
+        setRetroOpen(false)
+        setSessionId(nextSessionId)
       })
       .on('broadcast', { event: 'ticket-zone-changed' }, ({ payload }) => {
         const { ticketId, zoneId } = payload as { ticketId: number | string; zoneId: string }
@@ -208,7 +230,7 @@ function App() {
       channelRef.current = null
       void client.removeChannel(channel)
     }
-  }, [joined, displayName, isAdmin])
+  }, [joined, displayName, isAdmin, sessionId])
 
   const joinSession = () => {
     const value = pseudo.trim()
@@ -298,6 +320,27 @@ function App() {
   const openRetro = () => {
     if (!isAdmin || zones.some((zone) => !zone.name.trim())) return
     void saveSessionConfig({ zones, isOpen: true, voteFinished: false, ticketZones: {}, ticketActions: {} })
+  }
+
+  const createNewSession = async () => {
+    if (!isAdmin) return
+    const nextSessionId = createSessionKey()
+    void channelRef.current?.send({ type: 'broadcast', event: 'session-reset', payload: { sessionId: nextSessionId } })
+    if (supabase) {
+      await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
+      await supabase.from('retro_votes').delete().eq('session_id', sessionId)
+      await supabase.from('retro_sessions').delete().eq('id', sessionId)
+    }
+    setSessionId(nextSessionId)
+    window.history.replaceState(null, '', `${window.location.pathname}?session=${nextSessionId}`)
+    setTickets(starterTickets)
+    setTicketVotes({})
+    setTicketZones({})
+    setTicketActions({})
+    setVoteOpen(false)
+    setVoteFinished(false)
+    setRetroOpen(false)
+    setRevealAll(false)
   }
 
   const voteCountFor = (ticketId: number | string) => ticketVotes[String(ticketId)] ?? []
@@ -434,19 +477,8 @@ function App() {
   }
 
   const resetSession = async () => {
-    if (!isAdmin || !window.confirm('Réinitialiser les tickets de cette rétro pour tout le monde ?')) return
-    setRevealAll(false)
-    setVoteOpen(false)
-    setTicketVotes({})
-    if (supabase) {
-      const { error } = await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
-      if (error) {
-        window.alert('La réinitialisation est bloquée par les droits Supabase. Exécutez la policy DELETE du fichier supabase-schema.sql.')
-        return
-      }
-      await supabase.from('retro_votes').delete().eq('session_id', sessionId)
-    }
-    setTickets([])
+    if (!isAdmin || !window.confirm('Créer une nouvelle séance et réinitialiser tous les acteurs, tickets, votes et actions ?')) return
+    await createNewSession()
   }
 
   if (!joined) {
@@ -455,7 +487,7 @@ function App() {
 
   if (!retroOpen) {
     if (isAdmin) {
-      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Préparation animateur</p><h1>Configurez les zones de la rétro.</h1><p className="setup-copy">Définissez les colonnes qui accueilleront les tickets après le vote. Les autres participants pourront entrer dès que vous ouvrirez la rétro.</p><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button></section></main>
+      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Préparation animateur</p><h1>Configurez les zones de la rétro.</h1><p className="setup-copy">Définissez les colonnes qui accueilleront les tickets après le vote. Les autres participants pourront entrer dès que vous ouvrirez la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>À transmettre avec le QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={createNewSession}>Créer une nouvelle séance</button><small className="share-url">{shareUrl}</small></section></main>
     }
     return <main className="waiting-page"><section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Rétro en préparation</p><h1>L’animateur prépare les zones.</h1><p>Cette page s’ouvrira automatiquement dès que la rétro sera lancée.</p></section></main>
   }
