@@ -28,8 +28,10 @@ type RemoteTicket = {
 type PresenceUser = { user: string; isAdmin: boolean }
 type TicketVotes = Record<string, string[]>
 type BoardEvent = { ticketId: number | string; author: string }
+type RemoteVote = { id: number; ticket_id: number; author: string }
 type Zone = { id: string; name: string; color: string }
-type SessionConfig = { zones: Zone[]; isOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string> }
+type ActionDecision = { status: 'action' | 'none'; text: string }
+type SessionConfig = { zones: Zone[]; isOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string>; ticketActions: Record<string, ActionDecision> }
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const starterTickets: Ticket[] = [
@@ -81,6 +83,7 @@ function App() {
   const [retroOpen, setRetroOpen] = useState(false)
   const [voteFinished, setVoteFinished] = useState(false)
   const [ticketZones, setTicketZones] = useState<Record<string, string>>({})
+  const [ticketActions, setTicketActions] = useState<Record<string, ActionDecision>>({})
   const [ticketVotes, setTicketVotes] = useState<TicketVotes>({})
   const [editingTicketId, setEditingTicketId] = useState<number | string | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -101,6 +104,17 @@ function App() {
     }
 
     void loadTickets()
+    const loadVotes = async () => {
+      const { data } = await client.from('retro_votes').select('id, ticket_id, author').eq('session_id', sessionId)
+      if (!active || !data) return
+      setTicketVotes(data.reduce<TicketVotes>((result, vote: RemoteVote) => {
+        const key = String(vote.ticket_id)
+        result[key] = [...(result[key] ?? []), vote.author]
+        return result
+      }, {}))
+    }
+
+    void loadVotes()
     const channel = client.channel(`retro-${sessionId}`, { config: { presence: { key: displayName } } })
       .on('presence', { event: 'sync' }, () => {
         const state = channel.presenceState<PresenceUser>()
@@ -119,6 +133,7 @@ function App() {
         setRetroOpen(config.isOpen)
         setVoteFinished(config.voteFinished)
         setTicketZones(config.ticketZones)
+        setTicketActions(config.ticketActions ?? {})
       })
       .on('broadcast', { event: 'ticket-zone-changed' }, ({ payload }) => {
         const { ticketId, zoneId } = payload as { ticketId: number | string; zoneId: string }
@@ -132,6 +147,19 @@ function App() {
           const nextVoters = active ? [...new Set([...voters, author])] : voters.filter((voter) => voter !== author)
           return { ...current, [key]: nextVoters }
         })
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'retro_votes', filter: `session_id=eq.${sessionId}` }, (payload) => {
+        const vote = payload.new as RemoteVote
+        setTicketVotes((current) => {
+          const key = String(vote.ticket_id)
+          const voters = current[key] ?? []
+          return voters.includes(vote.author) ? current : { ...current, [key]: [...voters, vote.author] }
+        })
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'retro_votes', filter: `session_id=eq.${sessionId}` }, (payload) => {
+        const vote = payload.old as RemoteVote
+        const key = String(vote.ticket_id)
+        setTicketVotes((current) => ({ ...current, [key]: (current[key] ?? []).filter((author) => author !== vote.author) }))
       })
       .on('broadcast', { event: 'ticket-edited' }, ({ payload }) => {
         const { id, author, text } = payload as { id: number; author: string; text: string }
@@ -153,11 +181,12 @@ function App() {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'retro_sessions', filter: `id=eq.${sessionId}` }, (payload) => {
-        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string> }
+        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision> }
         setZones(row.zones)
         setRetroOpen(row.is_open)
         setVoteFinished(row.vote_finished)
         setTicketZones(row.ticket_zones)
+        setTicketActions(row.ticket_actions ?? {})
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -169,6 +198,7 @@ function App() {
             setRetroOpen(Boolean(data.is_open))
             setVoteFinished(Boolean(data.vote_finished))
             setTicketZones((data.ticket_zones ?? {}) as Record<string, string>)
+            setTicketActions((data.ticket_actions ?? {}) as Record<string, ActionDecision>)
           }
         }
       })
@@ -232,7 +262,7 @@ function App() {
     const nextValue = !voteOpen
     setVoteOpen(nextValue)
     void channelRef.current?.send({ type: 'broadcast', event: 'tickets-locked', payload: { locked: nextValue } })
-    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: false, ticketZones })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: false, ticketZones, ticketActions })
   }
 
   const saveSessionConfig = async (config: SessionConfig) => {
@@ -240,9 +270,10 @@ function App() {
     setRetroOpen(config.isOpen)
     setVoteFinished(config.voteFinished)
     setTicketZones(config.ticketZones)
+    setTicketActions(config.ticketActions)
     void channelRef.current?.send({ type: 'broadcast', event: 'session-configured', payload: config })
     if (supabase) {
-      await supabase.from('retro_sessions').upsert({ id: sessionId, zones: config.zones, is_open: config.isOpen, vote_finished: config.voteFinished, ticket_zones: config.ticketZones })
+      await supabase.from('retro_sessions').upsert({ id: sessionId, zones: config.zones, is_open: config.isOpen, vote_finished: config.voteFinished, ticket_zones: config.ticketZones, ticket_actions: config.ticketActions })
     }
   }
 
@@ -250,13 +281,13 @@ function App() {
     if (!isAdmin || !voteOpen) return
     setVoteOpen(false)
     void channelRef.current?.send({ type: 'broadcast', event: 'tickets-locked', payload: { locked: false } })
-    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: true, ticketZones })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: true, ticketZones, ticketActions })
   }
 
   const assignTicketZone = (ticketId: number | string, zoneId: string) => {
     if (!isAdmin || !voteFinished) return
     const nextZones = { ...ticketZones, [String(ticketId)]: zoneId }
-    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished, ticketZones: nextZones })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished, ticketZones: nextZones, ticketActions })
     void channelRef.current?.send({ type: 'broadcast', event: 'ticket-zone-changed', payload: { ticketId, zoneId } })
   }
 
@@ -266,11 +297,22 @@ function App() {
 
   const openRetro = () => {
     if (!isAdmin || zones.some((zone) => !zone.name.trim())) return
-    void saveSessionConfig({ zones, isOpen: true, voteFinished: false, ticketZones: {} })
+    void saveSessionConfig({ zones, isOpen: true, voteFinished: false, ticketZones: {}, ticketActions: {} })
   }
 
   const voteCountFor = (ticketId: number | string) => ticketVotes[String(ticketId)] ?? []
   const voteTotalFor = (author: string) => Object.values(ticketVotes).filter((voters) => voters.includes(author)).length
+  const topVotedTickets = [...tickets].sort((left, right) => {
+    const voteDifference = voteCountFor(right.id).length - voteCountFor(left.id).length
+    return voteDifference || tickets.indexOf(left) - tickets.indexOf(right)
+  }).slice(0, 3)
+  const topVotedIds = new Set(topVotedTickets.map((ticket) => String(ticket.id)))
+
+  const updateTicketAction = (ticketId: number | string, nextDecision: ActionDecision) => {
+    if (!isAdmin || !voteFinished || !topVotedIds.has(String(ticketId))) return
+    const nextActions = { ...ticketActions, [String(ticketId)]: nextDecision }
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished, ticketZones, ticketActions: nextActions })
+  }
 
   const voteForTicket = (ticketId: number | string) => {
     if (!voteOpen || !displayName) return
@@ -281,6 +323,13 @@ function App() {
     const nextVoters = hasVoted ? voters.filter((voter) => voter !== displayName) : [...voters, displayName]
     setTicketVotes((current) => ({ ...current, [key]: nextVoters }))
     void channelRef.current?.send({ type: 'broadcast', event: 'ticket-voted', payload: { ticketId, author: displayName, active: !hasVoted } })
+    if (supabase && typeof ticketId === 'number') {
+      if (hasVoted) {
+        void supabase.from('retro_votes').delete().eq('session_id', sessionId).eq('ticket_id', ticketId).eq('author', displayName)
+      } else {
+        void supabase.from('retro_votes').insert({ session_id: sessionId, ticket_id: ticketId, author: displayName })
+      }
+    }
   }
 
   const beginEdit = (ticket: Ticket) => {
@@ -308,18 +357,72 @@ function App() {
   }
 
   const downloadMarkdown = () => {
+    const visibleTicketCount = tickets.filter((ticket) => !ticket.private || revealAll).length
+    const participantNames = [...new Set([
+      ...Object.values(ticketVotes).flat(),
+      ...tickets.map((ticket) => ticket.author),
+    ])].sort((left, right) => left.localeCompare(right, 'fr'))
+    const topTickets = topVotedTickets.map((ticket, index) => {
+      const voters = voteCountFor(ticket.id)
+      const zoneId = ticketZones[String(ticket.id)]
+      const zoneName = zones.find((zone) => zone.id === zoneId)?.name ?? 'Non attribuée'
+      return { ticket, rank: index + 1, voters, zoneName, decision: ticketActions[String(ticket.id)] }
+    })
     const lines = [
-      `# ${sessionName}`,
+      `# Compte rendu de la rétrospective — ${sessionName}`,
       '',
-      `Session: ${sessionId}`,
-      `Exportée le : ${new Date().toLocaleString('fr-FR')}`,
+      `- Session : ${sessionId}`,
+      `- Exportée le : ${new Date().toLocaleString('fr-FR')}`,
+      `- État : ${voteFinished ? 'Vote terminé et actions définies' : voteOpen ? 'Vote en cours' : 'Collecte des tickets'}`,
+      `- Tickets visibles au moment de l’export : ${visibleTicketCount}/${tickets.length}`,
       '',
-      '## Tickets',
-      ...tickets.map((ticket) => `- **${ticket.text}** — ${ticket.author}${ticket.private ? ' (privé)' : ''}`),
+      '## 1. Configuration de la rétro',
       '',
-      '## Votes',
-      ...tickets.map((ticket) => `- ${ticket.text} : ${voteCountFor(ticket.id).length} vote(s)`),
+      '### Zones configurées',
+      ...zones.map((zone, index) => `${index + 1}. **${zone.name}**`),
       '',
+      '### Participants identifiés',
+      ...(participantNames.length ? participantNames.map((name) => `- ${name}`) : ['- Aucun participant identifié']),
+      '',
+      '## 2. Tickets déposés',
+      '',
+      ...tickets.flatMap((ticket, index) => {
+        const voters = voteCountFor(ticket.id)
+        const zoneId = ticketZones[String(ticket.id)]
+        const zoneName = zones.find((zone) => zone.id === zoneId)?.name ?? 'Non attribuée'
+        const decision = ticketActions[String(ticket.id)]
+        const actionText = decision?.status === 'action' ? decision.text || 'Action à préciser' : 'Pas d’action définie'
+        return [
+          `### Ticket ${index + 1} — ${ticket.author}`,
+          '',
+          `- Texte : ${ticket.text}`,
+          `- Confidentialité initiale : ${ticket.private ? 'Privé' : 'Public'}`,
+          `- Couleur : ${ticket.color}`,
+          `- Votes : ${voters.length}${voters.length ? ` (${voters.join(', ')})` : ''}`,
+          `- Zone attribuée : ${zoneName}`,
+          `- Décision : ${actionText}`,
+          '',
+        ]
+      }),
+      '',
+      '## 3. Résultats du vote',
+      '',
+      `- Nombre de tickets votés : ${tickets.filter((ticket) => voteCountFor(ticket.id).length > 0).length}`,
+      `- Nombre total de votes exprimés : ${tickets.reduce((total, ticket) => total + voteCountFor(ticket.id).length, 0)}`,
+      '- Règle appliquée : 1 vote maximum par ticket et 3 votes maximum par participant',
+      '',
+      '### Classement final',
+      ...(topTickets.length ? topTickets.map(({ ticket, rank, voters, zoneName }) => `${rank}. **${ticket.text}** — ${voters.length} vote(s) — Zone : ${zoneName}`) : ['- Aucun classement disponible']),
+      '',
+      '## 4. Actions finales',
+      '',
+      ...(topTickets.length ? topTickets.map(({ ticket, rank, voters, zoneName, decision }) => {
+        const action = decision?.status === 'action' ? decision.text || 'Action à préciser' : 'Pas d’action'
+        return `### Action ${rank} — ${ticket.text}\n- Priorité : ${rank}\n- Votes : ${voters.length}\n- Zone : ${zoneName}\n- Décision : ${action}`
+      }) : ['Aucune action finale définie.']),
+      '',
+      '---',
+      'Document généré par Retro Planner.',
     ]
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -341,6 +444,7 @@ function App() {
         window.alert('La réinitialisation est bloquée par les droits Supabase. Exécutez la policy DELETE du fichier supabase-schema.sql.')
         return
       }
+      await supabase.from('retro_votes').delete().eq('session_id', sessionId)
     }
     setTickets([])
   }
@@ -385,9 +489,12 @@ function App() {
               const voters = voteCountFor(ticket.id)
               const hasVoted = voters.includes(displayName)
               const assignedZone = ticketZones[String(ticket.id)]
+              const isTopVoted = topVotedIds.has(String(ticket.id))
+              const topRank = topVotedTickets.findIndex((item) => item.id === ticket.id) + 1
+              const decision = ticketActions[String(ticket.id)] ?? { status: 'none' as const, text: '' }
               return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''}`} draggable={canMove && !isEditing && !voteOpen} onDragStart={() => canMove && !isEditing && !voteOpen && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
                 <div className="ticket-pin" />
-                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}</>}
+                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}</>}
               </div>
             })}
           </div>
