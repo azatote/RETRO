@@ -8,7 +8,8 @@ import './App.css'
 type Ticket = { id: number | string; text: string; author: string; color: string; x: number; y: number; private: boolean }
 type RemoteTicket = { id: number; text: string; author: string; color: string; x: number; y: number; is_private: boolean }
 type PresenceUser = { user: string; isAdmin: boolean }
-type Sticker = { id: string; author: string; color: string; ticketId: number | string }
+type Vote = { id: number | string; ticketId: number | string; author: string }
+type RemoteVote = { id: number; ticket_id: number; author: string }
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const starterTickets: Ticket[] = [
@@ -17,7 +18,6 @@ const starterTickets: Ticket[] = [
   { id: 3, text: 'Les échanges entre équipes nous ont aidés', author: 'Lina', color: colors[2], x: 70, y: 18, private: false },
 ]
 const sessionId = 'demo'
-const stickerColors = ['#ffd166', '#ff8b8b', '#79d5bd', '#9fb7ff']
 
 const toTicket = (ticket: RemoteTicket): Ticket => ({ id: ticket.id, text: ticket.text, author: ticket.author, color: ticket.color, x: ticket.x, y: ticket.y, private: ticket.is_private })
 
@@ -42,7 +42,7 @@ function App() {
   const [onlineUsers, setOnlineUsers] = useState<string[]>([])
   const [ticketError, setTicketError] = useState('')
   const [ticketsLocked, setTicketsLocked] = useState(false)
-  const [stickers, setStickers] = useState<Sticker[]>([])
+  const [votes, setVotes] = useState<Vote[]>([])
   const [editingTicketId, setEditingTicketId] = useState<number | string | null>(null)
   const [editingText, setEditingText] = useState('')
   const channelRef = useRef<RealtimeChannel | null>(null)
@@ -61,6 +61,11 @@ function App() {
       if (active && data) setTickets(data.map(toTicket))
     }
     void loadTickets()
+    const loadVotes = async () => {
+      const { data } = await client.from('retro_votes').select('*').eq('session_id', sessionId)
+      if (active && data) setVotes(data.map((vote: RemoteVote) => ({ id: vote.id, ticketId: vote.ticket_id, author: vote.author })))
+    }
+    void loadVotes()
     const channel = client.channel(`retro-${sessionId}`, { config: { presence: { key: displayName } } })
       .on('presence', { event: 'sync' }, () => {
         const state = channel.presenceState<PresenceUser>()
@@ -77,9 +82,9 @@ function App() {
       .on('broadcast', { event: 'tickets-locked' }, ({ payload }) => {
         setTicketsLocked(Boolean((payload as { locked: boolean }).locked))
       })
-      .on('broadcast', { event: 'sticker-placed' }, ({ payload }) => {
-        const sticker = payload as Sticker
-        setStickers((current) => current.some((item) => item.id === sticker.id) ? current : [...current, sticker])
+      .on('broadcast', { event: 'vote-changed' }, ({ payload }) => {
+        const vote = payload as Vote
+        setVotes((current) => current.some((item) => item.author === vote.author && item.ticketId === vote.ticketId) ? current : [...current, vote])
       })
       .on('broadcast', { event: 'ticket-edited' }, ({ payload }) => {
         const { id, author, text } = payload as { id: number; author: string; text: string }
@@ -95,6 +100,10 @@ function App() {
       })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'retro_votes', filter: `session_id=eq.${sessionId}` }, (payload) => {
+        const vote = payload.new as RemoteVote
+        setVotes((current) => current.some((item) => item.id === vote.id) ? current : [...current, { id: vote.id, ticketId: vote.ticket_id, author: vote.author }])
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -165,10 +174,7 @@ function App() {
   const dropSticker = (event: DragEvent<HTMLDivElement>, ticketId: number | string) => {
     event.preventDefault()
     const color = event.dataTransfer.getData('application/retro-sticker')
-    if (!color || ticketsLocked || stickers.filter((sticker) => sticker.author === displayName).length >= 3) return
-    const sticker: Sticker = { id: `${displayName}-${crypto.randomUUID()}`, author: displayName, color, ticketId }
-    setStickers((current) => [...current, sticker])
-    void channelRef.current?.send({ type: 'broadcast', event: 'sticker-placed', payload: sticker })
+    if (!color || ticketsLocked) return
   }
 
   const downloadMarkdown = () => {
