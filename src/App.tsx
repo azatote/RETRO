@@ -10,6 +10,7 @@ type RemoteTicket = { id: number; text: string; author: string; color: string; x
 type PresenceUser = { user: string; isAdmin: boolean }
 type Vote = { id: number | string; ticketId: number | string; author: string }
 type RemoteVote = { id: number; ticket_id: number; author: string }
+type Sticker = { id: string; author: string; color: string; ticketId: number | string }
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const starterTickets: Ticket[] = [
@@ -18,6 +19,7 @@ const starterTickets: Ticket[] = [
   { id: 3, text: 'Les échanges entre équipes nous ont aidés', author: 'Lina', color: colors[2], x: 70, y: 18, private: false },
 ]
 const sessionId = 'demo'
+const stickerColors = ['#ffd166', '#ff8b8b', '#79d5bd', '#9fb7ff']
 
 const toTicket = (ticket: RemoteTicket): Ticket => ({ id: ticket.id, text: ticket.text, author: ticket.author, color: ticket.color, x: ticket.x, y: ticket.y, private: ticket.is_private })
 
@@ -50,6 +52,7 @@ function App() {
   const isAdmin = normalizedPseudo.startsWith('@')
   const displayName = normalizedPseudo.replace(/^@/, '')
   const visibleOnlineUsers = isSupabaseConfigured ? onlineUsers : (displayName ? [displayName] : [])
+  const stickers: Sticker[] = votes.map((vote) => ({ id: String(vote.id), author: vote.author, color: stickerColors[0], ticketId: vote.ticketId }))
 
   useEffect(() => {
     const client = supabase
@@ -173,6 +176,7 @@ function App() {
 
   const dropSticker = (event: DragEvent<HTMLDivElement>, ticketId: number | string) => {
     event.preventDefault()
+    void ticketId
     const color = event.dataTransfer.getData('application/retro-sticker')
     if (!color || ticketsLocked) return
   }

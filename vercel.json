@@ -1,0 +1,5 @@
+{
+  "installCommand": "npm install --prefix RETRO-main",
+  "buildCommand": "npm run build --prefix RETRO-main",
+  "outputDirectory": "RETRO-main/dist"
+}
