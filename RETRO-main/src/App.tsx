@@ -33,15 +33,13 @@ type RemoteVote = { id: number; ticket_id: number; author: string }
 type Zone = { id: string; name: string; color: string }
 type ActionDecision = { status: 'action' | 'none'; text: string }
 type SessionConfig = { zones: Zone[]; isOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string>; ticketActions: Record<string, ActionDecision> }
+type SessionStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
-const starterTickets: Ticket[] = [
-  { id: 1, text: 'On a bien avancé sur les sujets complexes', author: 'Maya', color: colors[0], x: 18, y: 24, private: false },
-  { id: 2, text: 'Les décisions importantes étaient parfois floues', author: 'Noé', color: colors[1], x: 48, y: 31, private: true },
-  { id: 3, text: 'Les échanges entre équipes nous ont aidés', author: 'Lina', color: colors[2], x: 70, y: 18, private: false },
-]
 const createSessionKey = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()
-const initialSessionKey = new URLSearchParams(window.location.search).get('session') || 'DEMO'
+const requestedSessionKey = new URLSearchParams(window.location.search).get('session')?.trim().toUpperCase() ?? ''
+const isParticipantAccess = Boolean(requestedSessionKey)
+const hasValidSessionKeyFormat = /^[A-Z0-9]{10}$/.test(requestedSessionKey)
 const defaultZones: Zone[] = [
   { id: 'keep', name: 'À conserver', color: '#9ee7d1' },
   { id: 'improve', name: 'À améliorer', color: '#ffd166' },
@@ -71,9 +69,11 @@ const getAuthorPlacement = (author: string, ticketNumber: number) => {
 function App() {
   const [pseudo, setPseudo] = useState('')
   const [joined, setJoined] = useState(false)
-  const [sessionId, setSessionId] = useState(initialSessionKey)
+  const [sessionId, setSessionId] = useState(requestedSessionKey)
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus>(isParticipantAccess ? isSupabaseConfigured && hasValidSessionKeyFormat ? 'checking' : 'invalid' : 'idle')
+  const [sessionError, setSessionError] = useState(isParticipantAccess && !hasValidSessionKeyFormat ? 'Ce QR code ne contient pas une clé de séance valide.' : isParticipantAccess && !isSupabaseConfigured ? 'Le service temps réel est indisponible. Impossible de valider ce QR code.' : '')
   const [sessionName, setSessionName] = useState('La carte de notre sprint')
-  const [tickets, setTickets] = useState<Ticket[]>(starterTickets)
+  const [tickets, setTickets] = useState<Ticket[]>([])
   const [draft, setDraft] = useState('')
   const [isPrivate, setIsPrivate] = useState(true)
   const [selectedColor, setSelectedColor] = useState(colors[0])
@@ -90,19 +90,44 @@ function App() {
   const [ticketVotes, setTicketVotes] = useState<TicketVotes>({})
   const [editingTicketId, setEditingTicketId] = useState<number | string | null>(null)
   const [editingText, setEditingText] = useState('')
-  const [shareUrl, setShareUrl] = useState('')
   const [qrCodeUrl, setQrCodeUrl] = useState('')
   const channelRef = useRef<RealtimeChannel | null>(null)
   const normalizedPseudo = pseudo.trim()
-  const isAdmin = normalizedPseudo.startsWith('@')
+  const isAdmin = !isParticipantAccess
   const displayName = normalizedPseudo.replace(/^@/, '')
   const visibleOnlineUsers = isSupabaseConfigured ? onlineUsers : (displayName ? [displayName] : [])
+  const shareUrl = sessionId ? `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(sessionId)}` : ''
 
   useEffect(() => {
-    const url = `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(sessionId)}`
-    setShareUrl(url)
-    void QRCode.toDataURL(url, { width: 220, margin: 2, color: { dark: '#17262a', light: '#fffdf8' } }).then(setQrCodeUrl)
-  }, [sessionId])
+    if (!shareUrl) return
+    let active = true
+    void QRCode.toDataURL(shareUrl, { width: 220, margin: 2, color: { dark: '#17262a', light: '#fffdf8' } }).then((url) => {
+      if (active) setQrCodeUrl(url)
+    })
+    return () => { active = false }
+  }, [shareUrl])
+
+  useEffect(() => {
+    if (!isParticipantAccess || !hasValidSessionKeyFormat) return
+    const client = supabase
+    if (!client) return
+
+    let active = true
+    const validateSession = async () => {
+      const { data, error } = await client.from('retro_sessions').select('id').eq('id', requestedSessionKey).maybeSingle()
+      if (!active) return
+      if (error || !data) {
+        setSessionStatus('invalid')
+        setSessionError('Cette séance est inconnue ou terminée. Scannez le nouveau QR code affiché par l’animateur.')
+        return
+      }
+      setSessionStatus('valid')
+      setSessionError('')
+    }
+
+    void validateSession()
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     const client = supabase
@@ -146,16 +171,17 @@ function App() {
         setTicketZones(config.ticketZones)
         setTicketActions(config.ticketActions ?? {})
       })
-      .on('broadcast', { event: 'session-reset' }, ({ payload }) => {
-        const { sessionId: nextSessionId } = payload as { sessionId: string }
-        setTickets(starterTickets)
+      .on('broadcast', { event: 'session-ended' }, () => {
+        setJoined(false)
+        setSessionStatus('invalid')
+        setSessionError('Cette séance est terminée. Scannez le nouveau QR code affiché par l’animateur.')
+        setTickets([])
         setTicketVotes({})
         setTicketZones({})
         setTicketActions({})
         setVoteOpen(false)
         setVoteFinished(false)
         setRetroOpen(false)
-        setSessionId(nextSessionId)
       })
       .on('broadcast', { event: 'ticket-zone-changed' }, ({ payload }) => {
         const { ticketId, zoneId } = payload as { ticketId: number | string; zoneId: string }
@@ -232,9 +258,40 @@ function App() {
     }
   }, [joined, displayName, isAdmin, sessionId])
 
-  const joinSession = () => {
+  const joinSession = async () => {
     const value = pseudo.trim()
     if (!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(value)) return
+    setSessionError('')
+
+    if (isParticipantAccess) {
+      if (sessionStatus !== 'valid') return
+      setPseudo(value)
+      setJoined(true)
+      return
+    }
+
+    if (!supabase) {
+      setSessionError('Configurez Supabase pour créer une séance accessible par QR code.')
+      return
+    }
+
+    if (!sessionId) {
+      const nextSessionId = createSessionKey()
+      const { error } = await supabase.from('retro_sessions').insert({
+        id: nextSessionId,
+        zones: defaultZones,
+        is_open: false,
+        vote_finished: false,
+        ticket_zones: {},
+        ticket_actions: {},
+      })
+      if (error) {
+        setSessionError(`La séance n’a pas pu être créée : ${error.message}`)
+        return
+      }
+      setSessionId(nextSessionId)
+      setSessionStatus('valid')
+    }
     setPseudo(value)
     setJoined(true)
   }
@@ -324,16 +381,31 @@ function App() {
 
   const createNewSession = async () => {
     if (!isAdmin) return
-    const nextSessionId = createSessionKey()
-    void channelRef.current?.send({ type: 'broadcast', event: 'session-reset', payload: { sessionId: nextSessionId } })
-    if (supabase) {
-      await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
-      await supabase.from('retro_votes').delete().eq('session_id', sessionId)
-      await supabase.from('retro_sessions').delete().eq('id', sessionId)
+    if (!supabase) {
+      setSessionError('Le service temps réel est indisponible. La nouvelle séance ne peut pas être créée.')
+      return
     }
+    const nextSessionId = createSessionKey()
+    const { error } = await supabase.from('retro_sessions').insert({
+      id: nextSessionId,
+      zones: defaultZones,
+      is_open: false,
+      vote_finished: false,
+      ticket_zones: {},
+      ticket_actions: {},
+    })
+    if (error) {
+      setSessionError(`La nouvelle séance n’a pas pu être créée : ${error.message}`)
+      return
+    }
+    await channelRef.current?.send({ type: 'broadcast', event: 'session-ended', payload: {} })
+    await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
+    await supabase.from('retro_votes').delete().eq('session_id', sessionId)
+    await supabase.from('retro_sessions').delete().eq('id', sessionId)
     setSessionId(nextSessionId)
-    window.history.replaceState(null, '', `${window.location.pathname}?session=${nextSessionId}`)
-    setTickets(starterTickets)
+    setSessionStatus('valid')
+    setSessionError('')
+    setTickets([])
     setTicketVotes({})
     setTicketZones({})
     setTicketActions({})
@@ -481,13 +553,21 @@ function App() {
     await createNewSession()
   }
 
+  if (isParticipantAccess && sessionStatus === 'checking') {
+    return <main className="waiting-page"><section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Vérification du QR code</p><h1>Connexion à la séance.</h1><p>La clé de l’animateur est en cours de validation.</p></section></main>
+  }
+
+  if (isParticipantAccess && sessionStatus === 'invalid') {
+    return <main className="login-page"><div className="login-card"><div className="logo-mark">R</div><p className="eyebrow">Accès impossible</p><h1>Ce QR code n’est plus actif.</h1><p className="login-copy">{sessionError}</p><span className="privacy-note">Demandez à l’animateur d’afficher le QR code de la séance en cours.</span></div></main>
+  }
+
   if (!joined) {
-    return <main className="login-page"><div className="login-card"><div className="logo-mark">R</div><p className="eyebrow">Rétro visuelle collaborative</p><h1>Construisons la carte de votre équipe.</h1><p className="login-copy">Choisissez un pseudo pour rejoindre l’espace de travail. Vos tickets peuvent rester secrets jusqu’au moment de les partager.</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && joinSession()} placeholder="Ex. Camille · @animateur" maxLength={24} /><p className="pseudo-hint">Préfixez votre pseudo avec <strong>@</strong> pour devenir l’animateur de la réunion.</p><button className="primary-button full" onClick={joinSession} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim())}>Entrer dans la rétro <span>→</span></button><span className="privacy-note">🔒 {isSupabaseConfigured ? 'Session temps réel activée' : 'Mode local · ajoutez Supabase pour le temps réel'}</span></div></main>
+    return <main className="login-page"><div className="login-card"><div className="logo-mark">R</div><p className="eyebrow">{isAdmin ? 'Démarrage animateur' : `Séance ${sessionId}`}</p><h1>{isAdmin ? 'Créez la séance avant d’accueillir l’équipe.' : 'Rejoignez la rétro.'}</h1><p className="login-copy">{isAdmin ? 'Votre connexion crée immédiatement une séance unique et son QR code. Les participants ne pourront entrer qu’en le scannant.' : 'Ce QR code a été validé. Choisissez votre pseudo pour rejoindre la séance de l’animateur.'}</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void joinSession()} placeholder={isAdmin ? 'Ex. Camille' : 'Ex. Morgan'} maxLength={24} />{sessionError && <p className="ticket-error">{sessionError}</p>}<button className="primary-button full" onClick={() => void joinSession()} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim()) || (isParticipantAccess && sessionStatus !== 'valid')}>{isAdmin ? 'Créer la séance et générer le QR' : 'Rejoindre la rétro'} <span>→</span></button><span className="privacy-note">🔒 {isSupabaseConfigured ? 'Accès sécurisé par la clé du QR code' : 'Supabase requis pour créer et valider les séances'}</span></div></main>
   }
 
   if (!retroOpen) {
     if (isAdmin) {
-      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Préparation animateur</p><h1>Configurez les zones de la rétro.</h1><p className="setup-copy">Définissez les colonnes qui accueilleront les tickets après le vote. Les autres participants pourront entrer dès que vous ouvrirez la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>À transmettre avec le QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={createNewSession}>Créer une nouvelle séance</button><small className="share-url">{shareUrl}</small></section></main>
+      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le QR code.</h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
     }
     return <main className="waiting-page"><section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Rétro en préparation</p><h1>L’animateur prépare les zones.</h1><p>Cette page s’ouvrira automatiquement dès que la rétro sera lancée.</p></section></main>
   }
