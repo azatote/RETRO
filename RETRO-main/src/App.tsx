@@ -28,6 +28,8 @@ type RemoteTicket = {
 type PresenceUser = { user: string; isAdmin: boolean }
 type TicketVotes = Record<string, string[]>
 type BoardEvent = { ticketId: number | string; author: string }
+type Zone = { id: string; name: string; color: string }
+type SessionConfig = { zones: Zone[]; isOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string> }
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const starterTickets: Ticket[] = [
@@ -36,6 +38,13 @@ const starterTickets: Ticket[] = [
   { id: 3, text: 'Les échanges entre équipes nous ont aidés', author: 'Lina', color: colors[2], x: 70, y: 18, private: false },
 ]
 const sessionId = 'demo'
+const defaultZones: Zone[] = [
+  { id: 'keep', name: 'À conserver', color: '#9ee7d1' },
+  { id: 'improve', name: 'À améliorer', color: '#ffd166' },
+  { id: 'try', name: 'À essayer', color: '#b7c9ff' },
+  { id: 'stop', name: 'À arrêter', color: '#ff9f9a' },
+  { id: 'celebrate', name: 'À célébrer', color: '#d7c1f5' },
+]
 
 const toTicket = (ticket: RemoteTicket): Ticket => ({
   id: ticket.id,
@@ -68,6 +77,10 @@ function App() {
   const [onlineUsers, setOnlineUsers] = useState<string[]>([])
   const [ticketError, setTicketError] = useState('')
   const [voteOpen, setVoteOpen] = useState(false)
+  const [zones, setZones] = useState<Zone[]>(defaultZones)
+  const [retroOpen, setRetroOpen] = useState(false)
+  const [voteFinished, setVoteFinished] = useState(false)
+  const [ticketZones, setTicketZones] = useState<Record<string, string>>({})
   const [ticketVotes, setTicketVotes] = useState<TicketVotes>({})
   const [editingTicketId, setEditingTicketId] = useState<number | string | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -100,6 +113,17 @@ function App() {
       .on('broadcast', { event: 'tickets-locked' }, ({ payload }) => {
         setVoteOpen(Boolean((payload as { locked: boolean }).locked))
       })
+      .on('broadcast', { event: 'session-configured' }, ({ payload }) => {
+        const config = payload as SessionConfig
+        setZones(config.zones)
+        setRetroOpen(config.isOpen)
+        setVoteFinished(config.voteFinished)
+        setTicketZones(config.ticketZones)
+      })
+      .on('broadcast', { event: 'ticket-zone-changed' }, ({ payload }) => {
+        const { ticketId, zoneId } = payload as { ticketId: number | string; zoneId: string }
+        setTicketZones((current) => ({ ...current, [String(ticketId)]: zoneId }))
+      })
       .on('broadcast', { event: 'ticket-voted' }, ({ payload }) => {
         const { ticketId, author, active } = payload as BoardEvent & { active: boolean }
         setTicketVotes((current) => {
@@ -128,10 +152,24 @@ function App() {
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'retro_tickets', filter: `session_id=eq.${sessionId}` }, (payload) => {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'retro_sessions', filter: `id=eq.${sessionId}` }, (payload) => {
+        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string> }
+        setZones(row.zones)
+        setRetroOpen(row.is_open)
+        setVoteFinished(row.vote_finished)
+        setTicketZones(row.ticket_zones)
+      })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           channelRef.current = channel
           await channel.track({ user: displayName, isAdmin })
+          const { data } = await client.from('retro_sessions').select('*').eq('id', sessionId).maybeSingle()
+          if (data) {
+            setZones(data.zones as Zone[])
+            setRetroOpen(Boolean(data.is_open))
+            setVoteFinished(Boolean(data.vote_finished))
+            setTicketZones((data.ticket_zones ?? {}) as Record<string, string>)
+          }
         }
       })
 
@@ -194,6 +232,41 @@ function App() {
     const nextValue = !voteOpen
     setVoteOpen(nextValue)
     void channelRef.current?.send({ type: 'broadcast', event: 'tickets-locked', payload: { locked: nextValue } })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: false, ticketZones })
+  }
+
+  const saveSessionConfig = async (config: SessionConfig) => {
+    setZones(config.zones)
+    setRetroOpen(config.isOpen)
+    setVoteFinished(config.voteFinished)
+    setTicketZones(config.ticketZones)
+    void channelRef.current?.send({ type: 'broadcast', event: 'session-configured', payload: config })
+    if (supabase) {
+      await supabase.from('retro_sessions').upsert({ id: sessionId, zones: config.zones, is_open: config.isOpen, vote_finished: config.voteFinished, ticket_zones: config.ticketZones })
+    }
+  }
+
+  const finishVote = () => {
+    if (!isAdmin || !voteOpen) return
+    setVoteOpen(false)
+    void channelRef.current?.send({ type: 'broadcast', event: 'tickets-locked', payload: { locked: false } })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: true, ticketZones })
+  }
+
+  const assignTicketZone = (ticketId: number | string, zoneId: string) => {
+    if (!isAdmin || !voteFinished) return
+    const nextZones = { ...ticketZones, [String(ticketId)]: zoneId }
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished, ticketZones: nextZones })
+    void channelRef.current?.send({ type: 'broadcast', event: 'ticket-zone-changed', payload: { ticketId, zoneId } })
+  }
+
+  const updateZoneName = (zoneId: string, name: string) => {
+    setZones((current) => current.map((zone) => zone.id === zoneId ? { ...zone, name } : zone))
+  }
+
+  const openRetro = () => {
+    if (!isAdmin || zones.some((zone) => !zone.name.trim())) return
+    void saveSessionConfig({ zones, isOpen: true, voteFinished: false, ticketZones: {} })
   }
 
   const voteCountFor = (ticketId: number | string) => ticketVotes[String(ticketId)] ?? []
@@ -276,6 +349,13 @@ function App() {
     return <main className="login-page"><div className="login-card"><div className="logo-mark">R</div><p className="eyebrow">Rétro visuelle collaborative</p><h1>Construisons la carte de votre équipe.</h1><p className="login-copy">Choisissez un pseudo pour rejoindre l’espace de travail. Vos tickets peuvent rester secrets jusqu’au moment de les partager.</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && joinSession()} placeholder="Ex. Camille · @animateur" maxLength={24} /><p className="pseudo-hint">Préfixez votre pseudo avec <strong>@</strong> pour devenir l’animateur de la réunion.</p><button className="primary-button full" onClick={joinSession} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim())}>Entrer dans la rétro <span>→</span></button><span className="privacy-note">🔒 {isSupabaseConfigured ? 'Session temps réel activée' : 'Mode local · ajoutez Supabase pour le temps réel'}</span></div></main>
   }
 
+  if (!retroOpen) {
+    if (isAdmin) {
+      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Préparation animateur</p><h1>Configurez les zones de la rétro.</h1><p className="setup-copy">Définissez les colonnes qui accueilleront les tickets après le vote. Les autres participants pourront entrer dès que vous ouvrirez la rétro.</p><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button></section></main>
+    }
+    return <main className="waiting-page"><section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Rétro en préparation</p><h1>L’animateur prépare les zones.</h1><p>Cette page s’ouvrira automatiquement dès que la rétro sera lancée.</p></section></main>
+  }
+
   return (
     <main className="workspace">
       <header className="workspace-header"><a className="brand" href="#workspace"><span className="logo-mark small">R</span><span>Retro Planner</span></a><div className="session-title"><span className="live-dot" /> Session en cours <strong>{sessionName}</strong></div><div className="user-chip"><span>{displayName.slice(0, 1).toUpperCase()}</span><div><strong>{displayName}</strong><small>{isAdmin ? 'Animateur · admin' : 'Participant'}</small></div><button className="logout-button" onClick={() => setJoined(false)}>Changer</button></div></header>
@@ -291,7 +371,7 @@ function App() {
           <div className="vote-panel"><strong>{voteOpen ? 'Phase 2 · Vote' : 'Phase 1 · Collecte'}</strong><small>{voteOpen ? 'Votez une fois par ticket, avec 3 votes au total.' : 'L’animateur lance le vote quand les tickets sont prêts.'}</small><span className="vote-total">Mes votes : {voteTotalFor(displayName)}/3</span></div>
           <div className="side-divider" />
           <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
-          {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button><button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Arrêter le vote' : 'Lancer le vote'} <span>{voteOpen ? '✓' : '→'}</span></button><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou arrêter le vote, ou réinitialiser la rétro.</p>}
+          {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
         </aside>
         <section className="board-area">
           <div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><button className="icon-button" aria-label="Partager la session">⌁</button></div></div>
@@ -304,13 +384,14 @@ function App() {
               const isEditing = editingTicketId === ticket.id
               const voters = voteCountFor(ticket.id)
               const hasVoted = voters.includes(displayName)
+              const assignedZone = ticketZones[String(ticket.id)]
               return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''}`} draggable={canMove && !isEditing && !voteOpen} onDragStart={() => canMove && !isEditing && !voteOpen && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
                 <div className="ticket-pin" />
-                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}</>}
+                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}</>}
               </div>
             })}
           </div>
-          <div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>{voteOpen ? 'Votez sur les tickets' : 'Déplacez uniquement vos tickets'}</span></div>
+          <div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>{voteOpen ? 'Votez sur les tickets' : voteFinished ? 'Attribuez les tickets aux zones' : 'Déplacez uniquement vos tickets'}</span></div>
         </section>
       </div>
     </main>

@@ -10,6 +10,33 @@ create table if not exists public.retro_tickets (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.retro_sessions (
+  id text primary key,
+  zones jsonb not null default '[]'::jsonb,
+  is_open boolean not null default false,
+  vote_finished boolean not null default false,
+  ticket_zones jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.retro_sessions enable row level security;
+
+create policy "Anyone can read retro session configuration"
+  on public.retro_sessions for select
+  to anon, authenticated
+  using (true);
+
+create policy "Anyone can configure retro session"
+  on public.retro_sessions for insert
+  to anon, authenticated
+  with check (true);
+
+create policy "Anyone can update retro session"
+  on public.retro_sessions for update
+  to anon, authenticated
+  using (true)
+  with check (true);
+
 alter table public.retro_tickets enable row level security;
 
 create policy "Anyone can read retro tickets"
@@ -34,3 +61,4 @@ create policy "Anyone can reset retro tickets"
   using (true);
 
 alter publication supabase_realtime add table public.retro_tickets;
+alter publication supabase_realtime add table public.retro_sessions;
