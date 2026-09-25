@@ -1,5 +1,5 @@
 {
-  "installCommand": "cd RETRO-main && npm install",
+  "installCommand": "cd RETRO-main && node -e \"require('node:fs').rmSync('node_modules',{recursive:true,force:true})\" && npm ci --registry=https://registry.npmjs.org",
   "buildCommand": "cd RETRO-main && npm run build",
   "outputDirectory": "RETRO-main/dist"
 }
