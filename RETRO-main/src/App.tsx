@@ -34,13 +34,15 @@ type BoardEvent = { ticketId: number | string; author: string }
 type RemoteVote = { id: number; ticket_id: number; author: string }
 type Zone = { id: string; name: string; color: string }
 type ActionDecision = { status: 'action' | 'none'; text: string }
-type SessionConfig = { zones: Zone[]; isOpen: boolean; voteOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string>; ticketActions: Record<string, ActionDecision> }
+type SessionConfig = { zones: Zone[]; isOpen: boolean; voteOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string>; ticketActions: Record<string, ActionDecision>; maxVotes?: number; actionCount?: number }
 type SessionStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const colorIcons: Record<string, string> = { '#ffd166': '🟨', '#ff9f9a': '🟥', '#9ee7d1': '🟩', '#b7c9ff': '🟦' }
 const zoneIcons = ['🟢', '🟡', '🔵', '🔴', '🟣']
 const medals = ['🥇', '🥈', '🥉']
+const MAX_SETTING = 10
+const clampSetting = (value: number) => Math.min(MAX_SETTING, Math.max(1, Math.round(value) || 1))
 const createSessionKey = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()
 const requestedSessionKey = new URLSearchParams(window.location.search).get('session')?.trim().toUpperCase() ?? ''
 const isParticipantAccess = Boolean(requestedSessionKey)
@@ -89,6 +91,8 @@ function App() {
   const [ticketError, setTicketError] = useState('')
   const [voteOpen, setVoteOpen] = useState(false)
   const [zones, setZones] = useState<Zone[]>(defaultZones)
+  const [maxVotes, setMaxVotes] = useState(3)
+  const [actionCount, setActionCount] = useState(3)
   const [retroOpen, setRetroOpen] = useState(false)
   const [voteFinished, setVoteFinished] = useState(false)
   const [ticketZones, setTicketZones] = useState<Record<string, string>>({})
@@ -177,6 +181,8 @@ function App() {
         setVoteFinished(config.voteFinished)
         setTicketZones(config.ticketZones)
         setTicketActions(config.ticketActions ?? {})
+        if (config.maxVotes) setMaxVotes(config.maxVotes)
+        if (config.actionCount) setActionCount(config.actionCount)
       })
       .on('broadcast', { event: 'session-ended' }, ({ payload }) => {
         setJoined(false)
@@ -236,13 +242,15 @@ function App() {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'retro_sessions', filter: `id=eq.${sessionId}` }, (payload) => {
-        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision> }
+        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision>; max_votes?: number; action_count?: number }
         setZones(row.zones)
         setRetroOpen(row.is_open)
         setVoteOpen(row.vote_open)
         setVoteFinished(row.vote_finished)
         setTicketZones(row.ticket_zones)
         setTicketActions(row.ticket_actions ?? {})
+        setMaxVotes(row.max_votes ?? 3)
+        setActionCount(row.action_count ?? 3)
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -256,6 +264,8 @@ function App() {
             setVoteFinished(Boolean(data.vote_finished))
             setTicketZones((data.ticket_zones ?? {}) as Record<string, string>)
             setTicketActions((data.ticket_actions ?? {}) as Record<string, ActionDecision>)
+            setMaxVotes(Number(data.max_votes ?? 3))
+            setActionCount(Number(data.action_count ?? 3))
           }
         }
       })
@@ -369,9 +379,10 @@ function App() {
     setVoteFinished(config.voteFinished)
     setTicketZones(config.ticketZones)
     setTicketActions(config.ticketActions)
-    void channelRef.current?.send({ type: 'broadcast', event: 'session-configured', payload: config })
+    const payload = { ...config, maxVotes, actionCount }
+    void channelRef.current?.send({ type: 'broadcast', event: 'session-configured', payload })
     if (supabase) {
-      await supabase.from('retro_sessions').upsert({ id: sessionId, zones: config.zones, is_open: config.isOpen, vote_open: config.voteOpen, vote_finished: config.voteFinished, ticket_zones: config.ticketZones, ticket_actions: config.ticketActions })
+      await supabase.from('retro_sessions').upsert({ id: sessionId, zones: config.zones, is_open: config.isOpen, vote_open: config.voteOpen, vote_finished: config.voteFinished, ticket_zones: config.ticketZones, ticket_actions: config.ticketActions, max_votes: maxVotes, action_count: actionCount })
     }
   }
 
@@ -452,8 +463,9 @@ function App() {
   const topVotedTickets = [...tickets].sort((left, right) => {
     const voteDifference = voteCountFor(right.id).length - voteCountFor(left.id).length
     return voteDifference || tickets.indexOf(left) - tickets.indexOf(right)
-  }).slice(0, 3)
+  }).slice(0, actionCount)
   const topVotedIds = new Set(topVotedTickets.map((ticket) => String(ticket.id)))
+  const votesLabel = `${maxVotes} vote${maxVotes > 1 ? 's' : ''}`
 
   const updateTicketAction = (ticketId: number | string, nextDecision: ActionDecision) => {
     if (!isAdmin || !voteFinished || !topVotedIds.has(String(ticketId))) return
@@ -466,7 +478,7 @@ function App() {
     const voters = voteCountFor(ticketId)
     const key = String(ticketId)
     const hasVoted = voters.includes(displayName)
-    if (!hasVoted && voteTotalFor(displayName) >= 3) return
+    if (!hasVoted && voteTotalFor(displayName) >= maxVotes) return
     const nextVoters = hasVoted ? voters.filter((voter) => voter !== displayName) : [...voters, displayName]
     setTicketVotes((current) => ({ ...current, [key]: nextVoters }))
     void channelRef.current?.send({ type: 'broadcast', event: 'ticket-voted', payload: { ticketId, author: displayName, active: !hasVoted } })
@@ -530,6 +542,11 @@ function App() {
       '',
       ...zones.map((zone, index) => `- ${zoneIcons[index % zoneIcons.length]} **${zone.name}**`),
       '',
+      '### 🎛️ Règles',
+      '',
+      `- 🗳️ Votes par participant : **${maxVotes}**`,
+      `- 🎯 Tickets avec action possible : **${actionCount}**`,
+      '',
       '### 👥 Participants',
       '',
       ...(participantNames.length ? participantNames.map((name) => `- 👤 ${name}`) : ['_Aucun participant identifié._']),
@@ -556,7 +573,7 @@ function App() {
       '',
       `- 📊 Tickets votés : ${reportTickets.filter((ticket) => voteCountFor(ticket.id).length > 0).length}`,
       `- ✋ Votes exprimés : ${reportTickets.reduce((total, ticket) => total + voteCountFor(ticket.id).length, 0)}`,
-      '- 📏 Règle : 1 vote maximum par ticket, 3 votes par participant',
+      `- 📏 Règle : 1 vote maximum par ticket, ${votesLabel} par participant`,
       '',
       '### 🏆 Classement final',
       '',
@@ -632,7 +649,7 @@ function App() {
 
   if (!retroOpen) {
     if (isAdmin) {
-      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le QR code.</h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
+      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le QR code.</h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="setup-settings"><label>Votes par participant<input type="number" min={1} max={MAX_SETTING} value={maxVotes} onChange={(event) => setMaxVotes(clampSetting(Number(event.target.value)))} /></label><label>Tickets avec action possible<input type="number" min={1} max={MAX_SETTING} value={actionCount} onChange={(event) => setActionCount(clampSetting(Number(event.target.value)))} /></label></div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
     }
     return <main className="waiting-page"><section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Rétro en préparation</p><h1>L’animateur prépare les zones.</h1><p>Cette page s’ouvrira automatiquement dès que la rétro sera lancée.</p></section></main>
   }
@@ -649,7 +666,7 @@ function App() {
           <div className="compose-row"><div className="swatches">{colors.map((color) => <button aria-label={`Couleur ${color}`} className={selectedColor === color ? 'swatch selected' : 'swatch'} key={color} style={{ background: color }} onClick={() => setSelectedColor(color)} disabled={voteOpen} />)}</div><span className="char-count">{draft.length}/160</span></div>
           <label className="private-toggle"><input type="checkbox" checked={isPrivate} onChange={(event) => setIsPrivate(event.target.checked)} disabled={voteOpen} /><span className="fake-check">{isPrivate ? '✓' : ''}</span><span><strong>Ticket privé</strong><small>Caché aux autres jusqu’à ce que l’animateur révèle les tickets</small></span></label>
           <button className="primary-button full" onClick={addTicket} disabled={!draft.trim() || voteOpen}>+ Créer le ticket</button>{ticketError && <p className="ticket-error">Impossible d’enregistrer le ticket : {ticketError}</p>}
-          <div className="vote-panel"><strong>{voteOpen ? 'Phase 2 · Vote' : 'Phase 1 · Collecte'}</strong><small>{voteOpen ? 'Votez une fois par ticket, avec 3 votes au total.' : 'L’animateur lance le vote quand les tickets sont prêts.'}</small><span className="vote-total">Mes votes : {voteTotalFor(displayName)}/3</span></div>
+          <div className="vote-panel"><strong>{voteOpen ? 'Phase 2 · Vote' : 'Phase 1 · Collecte'}</strong><small>{voteOpen ? `Votez une fois par ticket, avec ${votesLabel} au total.` : 'L’animateur lance le vote quand les tickets sont prêts.'}</small><span className="vote-total">Mes votes : {voteTotalFor(displayName)}/{maxVotes}</span></div>
           <div className="side-divider" />
           <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
           {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button><button className="purge-button" onClick={() => void purgeSession()}>Terminer et tout effacer <span>✕</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
@@ -657,7 +674,7 @@ function App() {
         <section className="board-area">
           {isAdmin && <div className="dashboard-share"><div><span className="share-label">Lien participant</span><strong>Invitez l’équipe à rejoindre la séance</strong></div><a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></div>}
           <div className="board-stage"><div className="image-board custom-image" style={{ backgroundImage: `url(${backgroundImage})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}>
-            <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : voteFinished ? 'CLASSEZ LES TICKETS PAR ZONE' : 'ORGANISEZ LES TICKETS SUR L’IMAGE'}</span><small>{isAdmin ? voteOpen ? 'Chaque participant dispose de 3 votes. Vous pouvez toujours réorganiser les tickets.' : 'Vous pouvez réorganiser tous les tickets.' : voteOpen ? 'Chaque participant dispose de 3 votes.' : voteFinished ? 'Seul l’animateur peut encore déplacer les tickets.' : 'Vous pouvez déplacer uniquement vos tickets.'}</small></div>
+            <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : voteFinished ? 'CLASSEZ LES TICKETS PAR ZONE' : 'ORGANISEZ LES TICKETS SUR L’IMAGE'}</span><small>{isAdmin ? voteOpen ? `Chaque participant dispose de ${votesLabel}. Vous pouvez toujours réorganiser les tickets.` : 'Vous pouvez réorganiser tous les tickets.' : voteOpen ? `Chaque participant dispose de ${votesLabel}.` : voteFinished ? 'Seul l’animateur peut encore déplacer les tickets.' : 'Vous pouvez déplacer uniquement vos tickets.'}</small></div>
             {tickets.map((ticket) => {
               const hidden = ticket.private && ticket.author !== displayName && !revealAll
               const isOwner = ticket.author === displayName
@@ -672,7 +689,7 @@ function App() {
               const decision = ticketActions[String(ticket.id)] ?? { status: 'none' as const, text: '' }
               return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''} ${voteFinished && !ticket.inReport ? 'is-excluded' : ''}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
                 <div className="ticket-pin" />
-                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {isOwner ? '· vous' : canMove ? '· déplaçable' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}{voteFinished && <label className="report-toggle"><input type="checkbox" checked={ticket.inReport} onChange={() => void toggleTicketReport(ticket)} />Dans le compte rendu</label>}</>}
+                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {isOwner ? '· vous' : canMove ? '· déplaçable' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= maxVotes} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}{voteFinished && <label className="report-toggle"><input type="checkbox" checked={ticket.inReport} onChange={() => void toggleTicketReport(ticket)} />Dans le compte rendu</label>}</>}
               </div>
             })}
           </div></div>

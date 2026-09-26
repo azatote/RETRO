@@ -21,6 +21,8 @@ create table if not exists public.retro_sessions (
   vote_finished boolean not null default false,
   ticket_zones jsonb not null default '{}'::jsonb,
   ticket_actions jsonb not null default '{}'::jsonb,
+  max_votes integer not null default 3,
+  action_count integer not null default 3,
   updated_at timestamptz not null default now()
 );
 
@@ -31,6 +33,8 @@ alter table public.retro_sessions
   add column if not exists vote_finished boolean not null default false,
   add column if not exists ticket_zones jsonb not null default '{}'::jsonb,
   add column if not exists ticket_actions jsonb not null default '{}'::jsonb,
+  add column if not exists max_votes integer not null default 3,
+  add column if not exists action_count integer not null default 3,
   add column if not exists updated_at timestamptz not null default now();
 
 create table if not exists public.retro_votes (
@@ -142,6 +146,12 @@ begin
       check (not (vote_open and vote_finished)) not valid;
   end if;
 
+  if not exists (select 1 from pg_constraint where conname = 'retro_sessions_limits_check' and conrelid = 'public.retro_sessions'::regclass) then
+    alter table public.retro_sessions
+      add constraint retro_sessions_limits_check
+      check (max_votes between 1 and 10 and action_count between 1 and 10) not valid;
+  end if;
+
   if not exists (select 1 from pg_constraint where conname = 'retro_tickets_text_check' and conrelid = 'public.retro_tickets'::regclass) then
     alter table public.retro_tickets
       add constraint retro_tickets_text_check
@@ -195,8 +205,8 @@ begin
     select count(*)
     from public.retro_votes
     where session_id = new.session_id and author = new.author
-  ) >= 3 then
-    raise exception 'A participant cannot cast more than three votes per session'
+  ) >= coalesce((select max_votes from public.retro_sessions where id = new.session_id), 3) then
+    raise exception 'A participant cannot exceed the vote limit of the session'
       using errcode = 'check_violation';
   end if;
   return new;
