@@ -9,6 +9,7 @@ create table if not exists public.retro_tickets (
   x double precision not null default 42,
   y double precision not null default 44,
   is_private boolean not null default true,
+  in_report boolean not null default true,
   created_at timestamptz not null default now()
 );
 
@@ -44,6 +45,7 @@ create table if not exists public.retro_votes (
 alter table public.retro_tickets
   add column if not exists session_id text,
   add column if not exists is_private boolean not null default true,
+  add column if not exists in_report boolean not null default true,
   add column if not exists created_at timestamptz not null default now();
 
 alter table public.retro_votes

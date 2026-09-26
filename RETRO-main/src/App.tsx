@@ -14,6 +14,7 @@ type Ticket = {
   x: number
   y: number
   private: boolean
+  inReport: boolean
 }
 
 type RemoteTicket = {
@@ -24,6 +25,7 @@ type RemoteTicket = {
   x: number
   y: number
   is_private: boolean
+  in_report?: boolean
 }
 
 type PresenceUser = { user: string; isAdmin: boolean }
@@ -36,6 +38,9 @@ type SessionConfig = { zones: Zone[]; isOpen: boolean; voteOpen: boolean; voteFi
 type SessionStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
+const colorIcons: Record<string, string> = { '#ffd166': '🟨', '#ff9f9a': '🟥', '#9ee7d1': '🟩', '#b7c9ff': '🟦' }
+const zoneIcons = ['🟢', '🟡', '🔵', '🔴', '🟣']
+const medals = ['🥇', '🥈', '🥉']
 const createSessionKey = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()
 const requestedSessionKey = new URLSearchParams(window.location.search).get('session')?.trim().toUpperCase() ?? ''
 const isParticipantAccess = Boolean(requestedSessionKey)
@@ -56,6 +61,7 @@ const toTicket = (ticket: RemoteTicket): Ticket => ({
   x: ticket.x,
   y: ticket.y,
   private: ticket.is_private,
+  inReport: ticket.in_report ?? true,
 })
 
 const getAuthorPlacement = (author: string, ticketNumber: number) => {
@@ -306,7 +312,7 @@ function App() {
     if (!text || !displayName) return
     const authorTicketCount = tickets.filter((ticket) => ticket.author === displayName).length
     const placement = getAuthorPlacement(displayName, authorTicketCount)
-    const ticket = { text, author: displayName, color: selectedColor, ...placement, private: isPrivate }
+    const ticket = { text, author: displayName, color: selectedColor, ...placement, private: isPrivate, inReport: true }
     const temporaryId = `pending-${Date.now()}`
     setTicketError('')
     setTickets((current) => [...current, { id: temporaryId, ...ticket }])
@@ -335,7 +341,7 @@ function App() {
 
   const moveTicket = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    if (draggedId === null || voteOpen || voteFinished) return
+    if (draggedId === null || (!isAdmin && (voteOpen || voteFinished))) return
     const draggedTicket = tickets.find((ticket) => ticket.id === draggedId)
     if (!draggedTicket || (!isAdmin && draggedTicket.author !== displayName)) return
     const board = event.currentTarget.getBoundingClientRect()
@@ -381,6 +387,18 @@ function App() {
     const nextZones = { ...ticketZones, [String(ticketId)]: zoneId }
     void saveSessionConfig({ zones, isOpen: retroOpen, voteOpen, voteFinished, ticketZones: nextZones, ticketActions })
     void channelRef.current?.send({ type: 'broadcast', event: 'ticket-zone-changed', payload: { ticketId, zoneId } })
+  }
+
+  const toggleTicketReport = async (ticket: Ticket) => {
+    if (!voteFinished) return
+    const inReport = !ticket.inReport
+    setTickets((current) => current.map((item) => item.id === ticket.id ? { ...item, inReport } : item))
+    if (!supabase || typeof ticket.id !== 'number') return
+    const { error } = await supabase.from('retro_tickets').update({ in_report: inReport }).eq('id', ticket.id)
+    if (error) {
+      setTickets((current) => current.map((item) => item.id === ticket.id ? { ...item, inReport: !inReport } : item))
+      setTicketError(error.message)
+    }
   }
 
   const updateZoneName = (zoneId: string, name: string) => {
@@ -486,72 +504,77 @@ function App() {
   }
 
   const downloadMarkdown = () => {
-    const visibleTicketCount = tickets.filter((ticket) => !ticket.private || revealAll).length
+    const reportTickets = tickets.filter((ticket) => ticket.inReport)
     const participantNames = [...new Set([
       ...Object.values(ticketVotes).flat(),
       ...tickets.map((ticket) => ticket.author),
     ])].sort((left, right) => left.localeCompare(right, 'fr'))
-    const topTickets = topVotedTickets.map((ticket, index) => {
-      const voters = voteCountFor(ticket.id)
-      const zoneId = ticketZones[String(ticket.id)]
-      const zoneName = zones.find((zone) => zone.id === zoneId)?.name ?? 'Non attribuée'
-      return { ticket, rank: index + 1, voters, zoneName, decision: ticketActions[String(ticket.id)] }
-    })
+    const zoneLabel = (ticketId: number | string) => {
+      const index = zones.findIndex((zone) => zone.id === ticketZones[String(ticketId)])
+      return index >= 0 ? `${zoneIcons[index % zoneIcons.length]} ${zones[index].name}` : '⚪ Non attribuée'
+    }
+    const rankLabel = (rank: number) => medals[rank - 1] ?? `#${rank}`
+    const quote = (text: string) => `> ${text.replace(/\n/g, '\n> ')}`
+    const topTickets = topVotedTickets.filter((ticket) => ticket.inReport).map((ticket, index) => ({
+      ticket, rank: index + 1, voters: voteCountFor(ticket.id), zoneName: zoneLabel(ticket.id), decision: ticketActions[String(ticket.id)],
+    }))
     const lines = [
-      `# Compte rendu de la rétrospective — ${sessionName}`,
+      '# 🧭 Compte rendu de la rétrospective',
       '',
-      `- Session : ${sessionId}`,
-      `- Exportée le : ${new Date().toLocaleString('fr-FR')}`,
-      `- État : ${voteFinished ? 'Vote terminé et actions définies' : voteOpen ? 'Vote en cours' : 'Collecte des tickets'}`,
-      `- Tickets visibles au moment de l’export : ${visibleTicketCount}/${tickets.length}`,
+      `> 🔑 Session **${sessionId}** · 📅 ${new Date().toLocaleString('fr-FR')} · ${voteFinished ? '✅ Vote terminé' : voteOpen ? '🗳️ Vote en cours' : '✍️ Collecte des tickets'}`,
+      `> 📝 Tickets retenus : **${reportTickets.length}/${tickets.length}**`,
       '',
-      '## 1. Configuration de la rétro',
+      '## ⚙️ 1. Configuration',
       '',
-      '### Zones configurées',
-      ...zones.map((zone, index) => `${index + 1}. **${zone.name}**`),
+      '### 🗂️ Zones',
       '',
-      '### Participants identifiés',
-      ...(participantNames.length ? participantNames.map((name) => `- ${name}`) : ['- Aucun participant identifié']),
+      ...zones.map((zone, index) => `- ${zoneIcons[index % zoneIcons.length]} **${zone.name}**`),
       '',
-      '## 2. Tickets déposés',
+      '### 👥 Participants',
       '',
-      ...tickets.flatMap((ticket, index) => {
+      ...(participantNames.length ? participantNames.map((name) => `- 👤 ${name}`) : ['_Aucun participant identifié._']),
+      '',
+      '## 📝 2. Tickets retenus',
+      '',
+      ...(reportTickets.length ? reportTickets.flatMap((ticket, index) => {
         const voters = voteCountFor(ticket.id)
-        const zoneId = ticketZones[String(ticket.id)]
-        const zoneName = zones.find((zone) => zone.id === zoneId)?.name ?? 'Non attribuée'
         const decision = ticketActions[String(ticket.id)]
-        const actionText = decision?.status === 'action' ? decision.text || 'Action à préciser' : 'Pas d’action définie'
+        const actionText = decision?.status === 'action' ? `🚀 ${decision.text || 'Action à préciser'}` : '⏸️ Pas d’action définie'
         return [
-          `### Ticket ${index + 1} — ${ticket.author}`,
+          `### ${colorIcons[ticket.color] ?? '🗒️'} Ticket ${index + 1} — ${ticket.author}`,
           '',
-          `- Texte : ${ticket.text}`,
-          `- Confidentialité initiale : ${ticket.private ? 'Privé' : 'Public'}`,
-          `- Couleur : ${ticket.color}`,
-          `- Votes : ${voters.length}${voters.length ? ` (${voters.join(', ')})` : ''}`,
-          `- Zone attribuée : ${zoneName}`,
-          `- Décision : ${actionText}`,
+          quote(ticket.text),
+          '',
+          `- ${ticket.private ? '🔒 Privé' : '🌐 Public'} à la création`,
+          `- 🗳️ Votes : ${voters.length}${voters.length ? ` (${voters.join(', ')})` : ''}`,
+          `- 📍 Zone : ${zoneLabel(ticket.id)}`,
+          `- 🎯 Décision : ${actionText}`,
           '',
         ]
-      }),
+      }) : ['_Aucun ticket retenu._', '']),
+      '## 🗳️ 3. Résultats du vote',
       '',
-      '## 3. Résultats du vote',
+      `- 📊 Tickets votés : ${reportTickets.filter((ticket) => voteCountFor(ticket.id).length > 0).length}`,
+      `- ✋ Votes exprimés : ${reportTickets.reduce((total, ticket) => total + voteCountFor(ticket.id).length, 0)}`,
+      '- 📏 Règle : 1 vote maximum par ticket, 3 votes par participant',
       '',
-      `- Nombre de tickets votés : ${tickets.filter((ticket) => voteCountFor(ticket.id).length > 0).length}`,
-      `- Nombre total de votes exprimés : ${tickets.reduce((total, ticket) => total + voteCountFor(ticket.id).length, 0)}`,
-      '- Règle appliquée : 1 vote maximum par ticket et 3 votes maximum par participant',
+      '### 🏆 Classement final',
       '',
-      '### Classement final',
-      ...(topTickets.length ? topTickets.map(({ ticket, rank, voters, zoneName }) => `${rank}. **${ticket.text}** — ${voters.length} vote(s) — Zone : ${zoneName}`) : ['- Aucun classement disponible']),
+      ...(topTickets.length ? topTickets.map(({ ticket, rank, voters, zoneName }) => `- ${rankLabel(rank)} **${ticket.text}** — ${voters.length} vote(s) — ${zoneName}`) : ['_Aucun classement disponible._']),
       '',
-      '## 4. Actions finales',
+      '## ✅ 4. Plan d’action',
       '',
-      ...(topTickets.length ? topTickets.map(({ ticket, rank, voters, zoneName, decision }) => {
-        const action = decision?.status === 'action' ? decision.text || 'Action à préciser' : 'Pas d’action'
-        return `### Action ${rank} — ${ticket.text}\n- Priorité : ${rank}\n- Votes : ${voters.length}\n- Zone : ${zoneName}\n- Décision : ${action}`
-      }) : ['Aucune action finale définie.']),
-      '',
+      ...(topTickets.length ? topTickets.flatMap(({ ticket, rank, voters, zoneName, decision }) => [
+        `### ${rankLabel(rank)} ${ticket.text}`,
+        '',
+        `- 🗳️ Votes : ${voters.length}`,
+        `- 📍 Zone : ${zoneName}`,
+        `- 🎯 Décision : ${decision?.status === 'action' ? `🚀 ${decision.text || 'Action à préciser'}` : '⏸️ Pas d’action'}`,
+        '',
+      ]) : ['_Aucune action finale définie._', '']),
       '---',
-      'Document généré par GERetro.',
+      '',
+      '_✨ Document généré par GERetro._',
     ]
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -596,7 +619,7 @@ function App() {
           <p className="side-help">Écrivez ce que vous voulez déposer sur la carte. Les tickets privés ne sont visibles que par vous.</p>
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Une idée, un ressenti, un fait..." rows={4} maxLength={160} disabled={voteOpen} />
           <div className="compose-row"><div className="swatches">{colors.map((color) => <button aria-label={`Couleur ${color}`} className={selectedColor === color ? 'swatch selected' : 'swatch'} key={color} style={{ background: color }} onClick={() => setSelectedColor(color)} disabled={voteOpen} />)}</div><span className="char-count">{draft.length}/160</span></div>
-          <label className="private-toggle"><input type="checkbox" checked={isPrivate} onChange={(event) => setIsPrivate(event.target.checked)} disabled={voteOpen} /><span className="fake-check">{isPrivate ? '✓' : ''}</span><span><strong>Ticket privé</strong><small>Révélez-le quand vous êtes prêt</small></span></label>
+          <label className="private-toggle"><input type="checkbox" checked={isPrivate} onChange={(event) => setIsPrivate(event.target.checked)} disabled={voteOpen} /><span className="fake-check">{isPrivate ? '✓' : ''}</span><span><strong>Ticket privé</strong><small>Caché aux autres jusqu’à ce que l’animateur révèle les tickets</small></span></label>
           <button className="primary-button full" onClick={addTicket} disabled={!draft.trim() || voteOpen}>+ Créer le ticket</button>{ticketError && <p className="ticket-error">Impossible d’enregistrer le ticket : {ticketError}</p>}
           <div className="vote-panel"><strong>{voteOpen ? 'Phase 2 · Vote' : 'Phase 1 · Collecte'}</strong><small>{voteOpen ? 'Votez une fois par ticket, avec 3 votes au total.' : 'L’animateur lance le vote quand les tickets sont prêts.'}</small><span className="vote-total">Mes votes : {voteTotalFor(displayName)}/3</span></div>
           <div className="side-divider" />
@@ -606,11 +629,11 @@ function App() {
         <section className="board-area">
           {isAdmin && <div className="dashboard-share"><div><span className="share-label">Lien participant</span><strong>Invitez l’équipe à rejoindre la séance</strong></div><a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></div>}
           <div className="board-stage"><div className="image-board custom-image" style={{ backgroundImage: `url(${backgroundImage})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}>
-            <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : voteFinished ? 'CLASSEZ LES TICKETS PAR ZONE' : 'ORGANISEZ LES TICKETS SUR L’IMAGE'}</span><small>{voteOpen ? 'Chaque participant dispose de 3 votes.' : voteFinished ? 'Les positions sont verrouillées après le vote.' : isAdmin ? 'Vous pouvez réorganiser tous les tickets avant le vote.' : 'Vous pouvez déplacer uniquement vos tickets.'}</small></div>
+            <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : voteFinished ? 'CLASSEZ LES TICKETS PAR ZONE' : 'ORGANISEZ LES TICKETS SUR L’IMAGE'}</span><small>{isAdmin ? voteOpen ? 'Chaque participant dispose de 3 votes. Vous pouvez toujours réorganiser les tickets.' : 'Vous pouvez réorganiser tous les tickets.' : voteOpen ? 'Chaque participant dispose de 3 votes.' : voteFinished ? 'Seul l’animateur peut encore déplacer les tickets.' : 'Vous pouvez déplacer uniquement vos tickets.'}</small></div>
             {tickets.map((ticket) => {
               const hidden = ticket.private && ticket.author !== displayName && !revealAll
               const isOwner = ticket.author === displayName
-              const canMove = !voteOpen && !voteFinished && (isAdmin || isOwner)
+              const canMove = isAdmin || (isOwner && !voteOpen && !voteFinished)
               const canEdit = isOwner && ticket.private && !revealAll && !voteOpen && !voteFinished
               const isEditing = editingTicketId === ticket.id
               const voters = voteCountFor(ticket.id)
@@ -619,9 +642,9 @@ function App() {
               const isTopVoted = topVotedIds.has(String(ticket.id))
               const topRank = topVotedTickets.findIndex((item) => item.id === ticket.id) + 1
               const decision = ticketActions[String(ticket.id)] ?? { status: 'none' as const, text: '' }
-              return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
+              return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''} ${voteFinished && !ticket.inReport ? 'is-excluded' : ''}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
                 <div className="ticket-pin" />
-                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {isOwner ? '· vous' : canMove ? '· déplaçable' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}</>}
+                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {isOwner ? '· vous' : canMove ? '· déplaçable' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}{voteFinished && <label className="report-toggle"><input type="checkbox" checked={ticket.inReport} onChange={() => void toggleTicketReport(ticket)} />Dans le compte rendu</label>}</>}
               </div>
             })}
           </div></div>
