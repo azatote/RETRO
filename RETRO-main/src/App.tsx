@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { DragEvent } from 'react'
+import type { ChangeEvent, CSSProperties, DragEvent } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import QRCode from 'qrcode'
 import backgroundImage from './assets/heart-of-the-team.png'
@@ -43,6 +43,18 @@ const zoneIcons = ['🟢', '🟡', '🔵', '🔴', '🟣']
 const medals = ['🥇', '🥈', '🥉']
 const MAX_SETTING = 10
 const clampSetting = (value: number) => Math.min(MAX_SETTING, Math.max(1, Math.round(value) || 1))
+const BACKGROUND_BUCKET = 'retro-backgrounds'
+const BACKGROUND_TYPES = ['image/png', 'image/jpeg', 'image/webp']
+const BACKGROUND_MAX_BYTES = 5 * 1024 * 1024
+const toBackgroundUrl = (value: unknown) => typeof value === 'string' && value.startsWith('https://') ? value : null
+const removeSessionBackgrounds = async (id: string, keepPath?: string) => {
+  if (!supabase || !id) return null
+  const { data, error } = await supabase.storage.from(BACKGROUND_BUCKET).list(id)
+  if (error) return error
+  const paths = (data ?? []).map((file) => `${id}/${file.name}`).filter((path) => path !== keepPath)
+  if (!paths.length) return null
+  return (await supabase.storage.from(BACKGROUND_BUCKET).remove(paths)).error
+}
 const createSessionKey = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()
 const requestedSessionKey = new URLSearchParams(window.location.search).get('session')?.trim().toUpperCase() ?? ''
 const isParticipantAccess = Boolean(requestedSessionKey)
@@ -93,6 +105,9 @@ function App() {
   const [zones, setZones] = useState<Zone[]>(defaultZones)
   const [maxVotes, setMaxVotes] = useState(3)
   const [actionCount, setActionCount] = useState(3)
+  const [backgroundUrl, setBackgroundUrl] = useState<string | null>(null)
+  const [boardRatio, setBoardRatio] = useState(1672 / 941)
+  const [backgroundUploading, setBackgroundUploading] = useState(false)
   const [retroOpen, setRetroOpen] = useState(false)
   const [voteFinished, setVoteFinished] = useState(false)
   const [ticketZones, setTicketZones] = useState<Record<string, string>>({})
@@ -107,6 +122,17 @@ function App() {
   const displayName = normalizedPseudo.replace(/^@/, '')
   const visibleOnlineUsers = isSupabaseConfigured ? onlineUsers : (displayName ? [displayName] : [])
   const shareUrl = sessionId ? `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(sessionId)}` : ''
+  const boardImage = backgroundUrl ?? backgroundImage
+
+  useEffect(() => {
+    let active = true
+    const image = new Image()
+    image.onload = () => {
+      if (active && image.naturalWidth && image.naturalHeight) setBoardRatio(image.naturalWidth / image.naturalHeight)
+    }
+    image.src = boardImage
+    return () => { active = false }
+  }, [boardImage])
 
   useEffect(() => {
     if (!shareUrl) return
@@ -170,6 +196,9 @@ function App() {
       .on('broadcast', { event: 'visibility-changed' }, ({ payload }) => {
         setRevealAll(Boolean((payload as { revealAll: boolean }).revealAll))
       })
+      .on('broadcast', { event: 'background-changed' }, ({ payload }) => {
+        setBackgroundUrl(toBackgroundUrl((payload as { url: unknown }).url))
+      })
       .on('broadcast', { event: 'tickets-locked' }, ({ payload }) => {
         setVoteOpen(Boolean((payload as { locked: boolean }).locked))
       })
@@ -186,6 +215,7 @@ function App() {
       })
       .on('broadcast', { event: 'session-ended' }, ({ payload }) => {
         setJoined(false)
+        setBackgroundUrl(null)
         setSessionStatus('invalid')
         setSessionError((payload as { purged?: boolean })?.purged ? 'La rétro est terminée : toutes ses données ont été effacées.' : 'Cette séance est terminée. Scannez le nouveau QR code affiché par l’animateur.')
         setTickets([])
@@ -242,7 +272,7 @@ function App() {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'retro_sessions', filter: `id=eq.${sessionId}` }, (payload) => {
-        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision>; max_votes?: number; action_count?: number }
+        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision>; max_votes?: number; action_count?: number; background_url?: string | null }
         setZones(row.zones)
         setRetroOpen(row.is_open)
         setVoteOpen(row.vote_open)
@@ -251,6 +281,7 @@ function App() {
         setTicketActions(row.ticket_actions ?? {})
         setMaxVotes(row.max_votes ?? 3)
         setActionCount(row.action_count ?? 3)
+        setBackgroundUrl(toBackgroundUrl(row.background_url))
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -265,6 +296,7 @@ function App() {
             setTicketZones((data.ticket_zones ?? {}) as Record<string, string>)
             setTicketActions((data.ticket_actions ?? {}) as Record<string, ActionDecision>)
             setMaxVotes(Number(data.max_votes ?? 3))
+            setBackgroundUrl(toBackgroundUrl(data.background_url))
             setActionCount(Number(data.action_count ?? 3))
           }
         }
@@ -442,9 +474,11 @@ function App() {
       return
     }
     await channelRef.current?.send({ type: 'broadcast', event: 'session-ended', payload: {} })
+    await removeSessionBackgrounds(sessionId)
     await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
     await supabase.from('retro_votes').delete().eq('session_id', sessionId)
     await supabase.from('retro_sessions').delete().eq('id', sessionId)
+    setBackgroundUrl(null)
     setSessionId(nextSessionId)
     setSessionStatus('valid')
     setSessionError('')
@@ -607,19 +641,54 @@ function App() {
     await createNewSession()
   }
 
+  const applyBackground = async (url: string | null) => {
+    if (!supabase) return 'Le service temps réel est indisponible.'
+    const { error } = await supabase.from('retro_sessions').update({ background_url: url }).eq('id', sessionId)
+    if (error) return error.message
+    setBackgroundUrl(url)
+    void channelRef.current?.send({ type: 'broadcast', event: 'background-changed', payload: { url } })
+    return null
+  }
+
+  const uploadBackground = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!isAdmin || !supabase || !file) return
+    if (!BACKGROUND_TYPES.includes(file.type) || file.size > BACKGROUND_MAX_BYTES) {
+      window.alert('Choisissez une image PNG, JPEG ou WebP de 5 Mo maximum.')
+      return
+    }
+    setBackgroundUploading(true)
+    const path = `${sessionId}/${crypto.randomUUID()}.${file.type.split('/')[1]}`
+    const upload = await supabase.storage.from(BACKGROUND_BUCKET).upload(path, file, { contentType: file.type })
+    const error = upload.error?.message ?? await applyBackground(supabase.storage.from(BACKGROUND_BUCKET).getPublicUrl(path).data.publicUrl)
+    if (error) window.alert(`L’image n’a pas pu être enregistrée : ${error}`)
+    else await removeSessionBackgrounds(sessionId, path)
+    setBackgroundUploading(false)
+  }
+
+  const resetBackground = async () => {
+    if (!isAdmin) return
+    const error = await applyBackground(null)
+    if (error) window.alert(`L’image par défaut n’a pas pu être rétablie : ${error}`)
+    else await removeSessionBackgrounds(sessionId)
+  }
+
   const purgeSession = async () => {
     if (!isAdmin || !supabase) return
-    if (!window.confirm('Terminer la rétro et effacer définitivement toutes ses données (tickets, votes, zones, actions) ?\n\nTéléchargez le Markdown avant : cette action est irréversible.')) return
+    if (!window.confirm('Terminer la rétro et effacer définitivement toutes ses données (tickets, votes, zones, actions, image de fond) ?\n\nTéléchargez le Markdown avant : cette action est irréversible.')) return
+    const backgroundError = await removeSessionBackgrounds(sessionId)
     const votes = await supabase.from('retro_votes').delete().eq('session_id', sessionId)
     const ticketsResult = await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
     const session = await supabase.from('retro_sessions').delete().eq('id', sessionId)
-    const error = votes.error ?? ticketsResult.error ?? session.error
+    const error = backgroundError ?? votes.error ?? ticketsResult.error ?? session.error
     if (error) {
       window.alert(`Les données n’ont pas pu être entièrement effacées : ${error.message}`)
       return
     }
     await channelRef.current?.send({ type: 'broadcast', event: 'session-ended', payload: { purged: true } })
     setJoined(false)
+    setBackgroundUrl(null)
     setSessionId('')
     setSessionStatus('idle')
     setSessionError('')
@@ -669,11 +738,11 @@ function App() {
           <div className="vote-panel"><strong>{voteOpen ? 'Phase 2 · Vote' : 'Phase 1 · Collecte'}</strong><small>{voteOpen ? `Votez une fois par ticket, avec ${votesLabel} au total.` : 'L’animateur lance le vote quand les tickets sont prêts.'}</small><span className="vote-total">Mes votes : {voteTotalFor(displayName)}/{maxVotes}</span></div>
           <div className="side-divider" />
           <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
-          {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button><button className="purge-button" onClick={() => void purgeSession()}>Terminer et tout effacer <span>✕</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
+          {isAdmin ? <><label className="background-button">{backgroundUploading ? 'Envoi de l’image…' : 'Changer l’image de fond'} <span>🖼</span><input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label>{backgroundUrl && <button className="background-reset" onClick={() => void resetBackground()}>Rétablir l’image par défaut</button>}<button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button><button className="purge-button" onClick={() => void purgeSession()}>Terminer et tout effacer <span>✕</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
         </aside>
         <section className="board-area">
           {isAdmin && <div className="dashboard-share"><div><span className="share-label">Lien participant</span><strong>Invitez l’équipe à rejoindre la séance</strong></div><a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></div>}
-          <div className="board-stage"><div className="image-board custom-image" style={{ backgroundImage: `url(${backgroundImage})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}>
+          <div className="board-stage"><div className="image-board custom-image" style={{ backgroundImage: `url("${boardImage}")`, '--board-ratio': boardRatio } as CSSProperties} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}>
             <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : voteFinished ? 'CLASSEZ LES TICKETS PAR ZONE' : 'ORGANISEZ LES TICKETS SUR L’IMAGE'}</span><small>{isAdmin ? voteOpen ? `Chaque participant dispose de ${votesLabel}. Vous pouvez toujours réorganiser les tickets.` : 'Vous pouvez réorganiser tous les tickets.' : voteOpen ? `Chaque participant dispose de ${votesLabel}.` : voteFinished ? 'Seul l’animateur peut encore déplacer les tickets.' : 'Vous pouvez déplacer uniquement vos tickets.'}</small></div>
             {tickets.map((ticket) => {
               const hidden = ticket.private && ticket.author !== displayName && !revealAll

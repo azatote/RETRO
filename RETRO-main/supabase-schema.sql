@@ -23,6 +23,7 @@ create table if not exists public.retro_sessions (
   ticket_actions jsonb not null default '{}'::jsonb,
   max_votes integer not null default 3,
   action_count integer not null default 3,
+  background_url text,
   updated_at timestamptz not null default now()
 );
 
@@ -35,6 +36,7 @@ alter table public.retro_sessions
   add column if not exists ticket_actions jsonb not null default '{}'::jsonb,
   add column if not exists max_votes integer not null default 3,
   add column if not exists action_count integer not null default 3,
+  add column if not exists background_url text,
   add column if not exists updated_at timestamptz not null default now();
 
 create table if not exists public.retro_votes (
@@ -330,5 +332,35 @@ end
 $$;
 
 notify pgrst, 'reload schema';
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('retro-backgrounds', 'retro-backgrounds', true, 5242880, array['image/png', 'image/jpeg', 'image/webp'])
+on conflict (id) do update
+set public = excluded.public,
+    file_size_limit = excluded.file_size_limit,
+    allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "Anyone can read retro backgrounds" on storage.objects;
+drop policy if exists "Anyone can upload retro backgrounds" on storage.objects;
+drop policy if exists "Anyone can delete retro backgrounds" on storage.objects;
+
+create policy "Anyone can read retro backgrounds"
+  on storage.objects for select
+  to anon, authenticated
+  using (bucket_id = 'retro-backgrounds');
+
+-- Uploads only into the folder of an existing session.
+create policy "Anyone can upload retro backgrounds"
+  on storage.objects for insert
+  to anon, authenticated
+  with check (
+    bucket_id = 'retro-backgrounds'
+    and exists (select 1 from public.retro_sessions s where s.id = (storage.foldername(name))[1])
+  );
+
+create policy "Anyone can delete retro backgrounds"
+  on storage.objects for delete
+  to anon, authenticated
+  using (bucket_id = 'retro-backgrounds');
 
 commit;
