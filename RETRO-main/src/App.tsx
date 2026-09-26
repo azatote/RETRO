@@ -72,7 +72,7 @@ function App() {
   const [sessionId, setSessionId] = useState(requestedSessionKey)
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>(isParticipantAccess ? isSupabaseConfigured && hasValidSessionKeyFormat ? 'checking' : 'invalid' : 'idle')
   const [sessionError, setSessionError] = useState(isParticipantAccess && !hasValidSessionKeyFormat ? 'Ce QR code ne contient pas une clé de séance valide.' : isParticipantAccess && !isSupabaseConfigured ? 'Le service temps réel est indisponible. Impossible de valider ce QR code.' : '')
-  const [sessionName, setSessionName] = useState('La carte de notre sprint')
+  const sessionName = 'Rétrospective'
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [draft, setDraft] = useState('')
   const [isPrivate, setIsPrivate] = useState(true)
@@ -335,15 +335,15 @@ function App() {
 
   const moveTicket = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    if (draggedId === null || voteOpen) return
+    if (draggedId === null || voteOpen || voteFinished) return
     const draggedTicket = tickets.find((ticket) => ticket.id === draggedId)
-    if (!draggedTicket || draggedTicket.author !== displayName) return
+    if (!draggedTicket || (!isAdmin && draggedTicket.author !== displayName)) return
     const board = event.currentTarget.getBoundingClientRect()
     const x = Math.max(4, Math.min(84, ((event.clientX - board.left) / board.width) * 100 - 8))
     const y = Math.max(4, Math.min(82, ((event.clientY - board.top) / board.height) * 100 - 7))
     setTickets((current) => current.map((ticket) => ticket.id === draggedId ? { ...ticket, x, y } : ticket))
     if (supabase && typeof draggedId === 'number') {
-      void channelRef.current?.send({ type: 'broadcast', event: 'ticket-moved', payload: { id: draggedId, author: displayName, x, y } })
+      void channelRef.current?.send({ type: 'broadcast', event: 'ticket-moved', payload: { id: draggedId, author: draggedTicket.author, x, y } })
       void supabase.from('retro_tickets').update({ x, y }).eq('id', draggedId)
     }
   }
@@ -551,7 +551,7 @@ function App() {
       }) : ['Aucune action finale définie.']),
       '',
       '---',
-      'Document généré par Retro Planner.',
+      'Document généré par GERetro.',
     ]
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -572,11 +572,11 @@ function App() {
   }
 
   if (isParticipantAccess && sessionStatus === 'invalid') {
-    return <main className="login-page"><div className="login-card"><div className="logo-mark">R</div><p className="eyebrow">Accès impossible</p><h1>Ce QR code n’est plus actif.</h1><p className="login-copy">{sessionError}</p><span className="privacy-note">Demandez à l’animateur d’afficher le QR code de la séance en cours.</span></div></main>
+    return <main className="login-page"><div className="login-card"><div className="logo-mark">O</div><p className="eyebrow">Accès impossible</p><h1>Ce QR code n’est plus actif.</h1><p className="login-copy">{sessionError}</p><span className="privacy-note">Demandez à l’animateur d’afficher le QR code de la séance en cours.</span></div></main>
   }
 
   if (!joined) {
-    return <main className="login-page"><div className="login-card"><div className="logo-mark">R</div><p className="eyebrow">{isAdmin ? 'Démarrage animateur' : `Séance ${sessionId}`}</p><h1>{isAdmin ? 'Créez la séance avant d’accueillir l’équipe.' : 'Rejoignez la rétro.'}</h1><p className="login-copy">{isAdmin ? 'Votre connexion crée immédiatement une séance unique et son QR code. Les participants ne pourront entrer qu’en le scannant.' : 'Ce QR code a été validé. Choisissez votre pseudo pour rejoindre la séance de l’animateur.'}</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void joinSession()} placeholder={isAdmin ? 'Ex. Camille' : 'Ex. Morgan'} maxLength={24} />{sessionError && <p className="ticket-error">{sessionError}</p>}<button className="primary-button full" onClick={() => void joinSession()} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim()) || (isParticipantAccess && sessionStatus !== 'valid')}>{isAdmin ? 'Créer la séance et générer le QR' : 'Rejoindre la rétro'} <span>→</span></button><span className="privacy-note">🔒 {isSupabaseConfigured ? 'Accès sécurisé par la clé du QR code' : 'Supabase requis pour créer et valider les séances'}</span></div></main>
+    return <main className="login-page"><div className="login-card"><div className="logo-mark">O</div><p className="eyebrow">{isAdmin ? 'Démarrage animateur' : `Séance ${sessionId}`}</p><h1>{isAdmin ? 'Créez la séance avant d’accueillir l’équipe.' : 'Rejoignez la rétro.'}</h1><p className="login-copy">{isAdmin ? 'Votre connexion crée immédiatement une séance unique et son QR code. Les participants ne pourront entrer qu’en le scannant.' : 'Ce QR code a été validé. Choisissez votre pseudo pour rejoindre la séance de l’animateur.'}</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void joinSession()} placeholder={isAdmin ? 'Ex. Camille' : 'Ex. Morgan'} maxLength={24} />{sessionError && <p className="ticket-error">{sessionError}</p>}<button className="primary-button full" onClick={() => void joinSession()} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim()) || (isParticipantAccess && sessionStatus !== 'valid')}>{isAdmin ? 'Créer la séance et générer le QR' : 'Rejoindre la rétro'} <span>→</span></button><span className="privacy-note">🔒 {isSupabaseConfigured ? 'Accès sécurisé par la clé du QR code' : 'Supabase requis pour créer et valider les séances'}</span></div></main>
   }
 
   if (!retroOpen) {
@@ -588,7 +588,7 @@ function App() {
 
   return (
     <main className="workspace">
-      <header className="workspace-header"><a className="brand" href="#workspace"><span className="logo-mark small">R</span><span>Retro Planner</span></a><div className="session-title"><span className="live-dot" /> Session en cours <strong>{sessionName}</strong></div><div className="user-chip"><span>{displayName.slice(0, 1).toUpperCase()}</span><div><strong>{displayName}</strong><small>{isAdmin ? 'Animateur · admin' : 'Participant'}</small></div><button className="logout-button" onClick={() => setJoined(false)}>Changer</button></div></header>
+      <header className="workspace-header"><a className="brand" href="#workspace"><span className="logo-mark small">O</span><span>GERetro</span></a><div className="session-title"><span className="live-dot" /> Session en cours <strong>{sessionId}</strong></div><div className="user-chip"><span>{displayName.slice(0, 1).toUpperCase()}</span><div><strong>{displayName}</strong><small>{isAdmin ? 'Animateur · admin' : 'Participant'}</small></div><button className="logout-button" onClick={() => setJoined(false)}>Changer</button></div></header>
       <div className="workspace-layout">
         <aside className="sidebar">
           <div className="side-heading"><div><p className="eyebrow">Espace de travail</p><h2>Vos tickets</h2></div><span className="ticket-count">{tickets.length}</span></div>
@@ -604,13 +604,14 @@ function App() {
           {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
         </aside>
         <section className="board-area">
-          <div className="board-toolbar"><div><p className="eyebrow">La rétrospective</p><input className="title-input" value={sessionName} onChange={(event) => setSessionName(event.target.value)} /></div><div className="toolbar-actions"><button className="icon-button" aria-label="Partager la session">⌁</button></div></div>
+          {isAdmin && <div className="dashboard-share"><div><span className="share-label">Lien participant</span><strong>Invitez l’équipe à rejoindre la séance</strong></div><a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></div>}
           <div className="image-board custom-image" style={{ backgroundImage: `url(${backgroundImage})` }} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}>
-            <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : 'GLISSEZ VOS TICKETS SUR L’IMAGE'}</span><small>{voteOpen ? 'Chaque participant dispose de 3 votes.' : 'Chaque ticket reste déplaçable par son auteur uniquement'}</small></div>
+            <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : voteFinished ? 'CLASSEZ LES TICKETS PAR ZONE' : 'ORGANISEZ LES TICKETS SUR L’IMAGE'}</span><small>{voteOpen ? 'Chaque participant dispose de 3 votes.' : voteFinished ? 'Les positions sont verrouillées après le vote.' : isAdmin ? 'Vous pouvez réorganiser tous les tickets avant le vote.' : 'Vous pouvez déplacer uniquement vos tickets.'}</small></div>
             {tickets.map((ticket) => {
               const hidden = ticket.private && ticket.author !== displayName && !revealAll
-              const canMove = ticket.author === displayName
-              const canEdit = canMove && ticket.private && !revealAll && !voteOpen
+              const isOwner = ticket.author === displayName
+              const canMove = !voteOpen && !voteFinished && (isAdmin || isOwner)
+              const canEdit = isOwner && ticket.private && !revealAll && !voteOpen && !voteFinished
               const isEditing = editingTicketId === ticket.id
               const voters = voteCountFor(ticket.id)
               const hasVoted = voters.includes(displayName)
@@ -618,13 +619,13 @@ function App() {
               const isTopVoted = topVotedIds.has(String(ticket.id))
               const topRank = topVotedTickets.findIndex((item) => item.id === ticket.id) + 1
               const decision = ticketActions[String(ticket.id)] ?? { status: 'none' as const, text: '' }
-              return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''}`} draggable={canMove && !isEditing && !voteOpen} onDragStart={() => canMove && !isEditing && !voteOpen && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
+              return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
                 <div className="ticket-pin" />
-                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {canMove ? '· vous' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}</>}
+                {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {isOwner ? '· vous' : canMove ? '· déplaçable' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= 3} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}</>}
               </div>
             })}
           </div>
-          <div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>{voteOpen ? 'Votez sur les tickets' : voteFinished ? 'Attribuez les tickets aux zones' : 'Déplacez uniquement vos tickets'}</span></div>
+          <div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>{voteOpen ? 'Votez sur les tickets' : voteFinished ? 'Attribuez les tickets aux zones' : isAdmin ? 'Réorganisez tous les tickets' : 'Déplacez uniquement vos tickets'}</span></div>
         </section>
       </div>
     </main>

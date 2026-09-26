@@ -1,4 +1,4 @@
-# Retro Planner Replica
+# GERetro
 
 Interface React/TypeScript construite avec Vite, prete a etre versionnee dans Git et deployee sur Vercel.
 
