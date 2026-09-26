@@ -178,10 +178,10 @@ function App() {
         setTicketZones(config.ticketZones)
         setTicketActions(config.ticketActions ?? {})
       })
-      .on('broadcast', { event: 'session-ended' }, () => {
+      .on('broadcast', { event: 'session-ended' }, ({ payload }) => {
         setJoined(false)
         setSessionStatus('invalid')
-        setSessionError('Cette séance est terminée. Scannez le nouveau QR code affiché par l’animateur.')
+        setSessionError((payload as { purged?: boolean })?.purged ? 'La rétro est terminée : toutes ses données ont été effacées.' : 'Cette séance est terminée. Scannez le nouveau QR code affiché par l’animateur.')
         setTickets([])
         setTicketVotes({})
         setTicketZones({})
@@ -590,6 +590,34 @@ function App() {
     await createNewSession()
   }
 
+  const purgeSession = async () => {
+    if (!isAdmin || !supabase) return
+    if (!window.confirm('Terminer la rétro et effacer définitivement toutes ses données (tickets, votes, zones, actions) ?\n\nTéléchargez le Markdown avant : cette action est irréversible.')) return
+    const votes = await supabase.from('retro_votes').delete().eq('session_id', sessionId)
+    const ticketsResult = await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
+    const session = await supabase.from('retro_sessions').delete().eq('id', sessionId)
+    const error = votes.error ?? ticketsResult.error ?? session.error
+    if (error) {
+      window.alert(`Les données n’ont pas pu être entièrement effacées : ${error.message}`)
+      return
+    }
+    await channelRef.current?.send({ type: 'broadcast', event: 'session-ended', payload: { purged: true } })
+    setJoined(false)
+    setSessionId('')
+    setSessionStatus('idle')
+    setSessionError('')
+    setQrCodeUrl('')
+    setTickets([])
+    setTicketVotes({})
+    setTicketZones({})
+    setTicketActions({})
+    setZones(defaultZones)
+    setVoteOpen(false)
+    setVoteFinished(false)
+    setRetroOpen(false)
+    setRevealAll(false)
+  }
+
   if (isParticipantAccess && sessionStatus === 'checking') {
     return <main className="waiting-page"><section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Vérification du QR code</p><h1>Connexion à la séance.</h1><p>La clé de l’animateur est en cours de validation.</p></section></main>
   }
@@ -624,7 +652,7 @@ function App() {
           <div className="vote-panel"><strong>{voteOpen ? 'Phase 2 · Vote' : 'Phase 1 · Collecte'}</strong><small>{voteOpen ? 'Votez une fois par ticket, avec 3 votes au total.' : 'L’animateur lance le vote quand les tickets sont prêts.'}</small><span className="vote-total">Mes votes : {voteTotalFor(displayName)}/3</span></div>
           <div className="side-divider" />
           <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
-          {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
+          {isAdmin ? <><button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button><button className="purge-button" onClick={() => void purgeSession()}>Terminer et tout effacer <span>✕</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
         </aside>
         <section className="board-area">
           {isAdmin && <div className="dashboard-share"><div><span className="share-label">Lien participant</span><strong>Invitez l’équipe à rejoindre la séance</strong></div><a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></div>}
