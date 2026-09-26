@@ -24,6 +24,7 @@ create table if not exists public.retro_sessions (
   max_votes integer not null default 3,
   action_count integer not null default 3,
   background_url text,
+  icebreaker_open boolean not null default false,
   updated_at timestamptz not null default now()
 );
 
@@ -37,6 +38,7 @@ alter table public.retro_sessions
   add column if not exists max_votes integer not null default 3,
   add column if not exists action_count integer not null default 3,
   add column if not exists background_url text,
+  add column if not exists icebreaker_open boolean not null default false,
   add column if not exists updated_at timestamptz not null default now();
 
 create table if not exists public.retro_votes (
@@ -297,6 +299,36 @@ create policy "Anyone can remove own retro votes"
 alter table public.retro_tickets replica identity full;
 alter table public.retro_votes replica identity full;
 
+create table if not exists public.retro_icebreaker_draws (
+  session_id text not null references public.retro_sessions(id) on delete cascade,
+  author text not null check (char_length(btrim(author)) between 1 and 24),
+  card smallint not null check (card between 1 and 18),
+  created_at timestamptz not null default now(),
+  primary key (session_id, author)
+);
+
+alter table public.retro_icebreaker_draws enable row level security;
+drop policy if exists "Anyone can read icebreaker draws" on public.retro_icebreaker_draws;
+drop policy if exists "Anyone can draw an icebreaker card" on public.retro_icebreaker_draws;
+drop policy if exists "Anyone can reset icebreaker draws" on public.retro_icebreaker_draws;
+
+create policy "Anyone can read icebreaker draws"
+  on public.retro_icebreaker_draws for select
+  to anon, authenticated
+  using (true);
+
+create policy "Anyone can draw an icebreaker card"
+  on public.retro_icebreaker_draws for insert
+  to anon, authenticated
+  with check (true);
+
+create policy "Anyone can reset icebreaker draws"
+  on public.retro_icebreaker_draws for delete
+  to anon, authenticated
+  using (true);
+
+alter table public.retro_icebreaker_draws replica identity full;
+
 do $$
 begin
   if exists (select 1 from pg_publication where pubname = 'supabase_realtime') and not exists (
@@ -327,6 +359,16 @@ begin
     where p.pubname = 'supabase_realtime' and c.oid = 'public.retro_votes'::regclass
   ) then
     alter publication supabase_realtime add table public.retro_votes;
+  end if;
+
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') and not exists (
+    select 1
+    from pg_publication_rel pr
+    join pg_class c on c.oid = pr.prrelid
+    join pg_publication p on p.oid = pr.prpubid
+    where p.pubname = 'supabase_realtime' and c.oid = 'public.retro_icebreaker_draws'::regclass
+  ) then
+    alter publication supabase_realtime add table public.retro_icebreaker_draws;
   end if;
 end
 $$;

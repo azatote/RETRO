@@ -3,6 +3,7 @@ import type { ChangeEvent, CSSProperties, DragEvent } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import QRCode from 'qrcode'
 import backgroundImage from './assets/heart-of-the-team.png'
+import cardBack from '../img_taccos_game/dos.png'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import './App.css'
 
@@ -36,6 +37,14 @@ type Zone = { id: string; name: string; color: string }
 type ActionDecision = { status: 'action' | 'none'; text: string }
 type SessionConfig = { zones: Zone[]; isOpen: boolean; voteOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string>; ticketActions: Record<string, ActionDecision>; maxVotes?: number; actionCount?: number }
 type SessionStatus = 'idle' | 'checking' | 'valid' | 'invalid'
+type IcebreakerDraw = { author: string; card: number }
+
+const cardNumber = (path: string) => Number(path.match(/(\d+)\.png$/)?.[1] ?? 0)
+const cardImages = Object.entries(import.meta.glob<string>('../img_taccos_game/img*.png', { eager: true, import: 'default' }))
+  .sort(([left], [right]) => cardNumber(left) - cardNumber(right))
+  .map(([, url]) => url)
+const DECK_SIZE = 6
+const shuffleDuration = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1800
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
 const colorIcons: Record<string, string> = { '#ffd166': '🟨', '#ff9f9a': '🟥', '#9ee7d1': '🟩', '#b7c9ff': '🟦' }
@@ -122,6 +131,11 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [linkCopied, setLinkCopied] = useState(false)
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const [icebreakerOpen, setIcebreakerOpen] = useState(false)
+  const [draws, setDraws] = useState<IcebreakerDraw[]>([])
+  const [drawing, setDrawing] = useState(false)
+  const [icebreakerError, setIcebreakerError] = useState('')
+  const drawsRef = useRef<IcebreakerDraw[]>([])
   const [retroOpen, setRetroOpen] = useState(false)
   const [voteFinished, setVoteFinished] = useState(false)
   const [ticketZones, setTicketZones] = useState<Record<string, string>>({})
@@ -137,6 +151,10 @@ function App() {
   const visibleOnlineUsers = isSupabaseConfigured ? onlineUsers : (displayName ? [displayName] : [])
   const shareUrl = sessionId ? `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(sessionId)}` : ''
   const boardImage = backgroundUrl ?? backgroundImage
+
+  useEffect(() => {
+    drawsRef.current = draws
+  }, [draws])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -227,6 +245,16 @@ function App() {
       .on('broadcast', { event: 'background-changed' }, ({ payload }) => {
         setBackgroundUrl(toBackgroundUrl((payload as { url: unknown }).url))
       })
+      .on('broadcast', { event: 'icebreaker-changed' }, ({ payload }) => {
+        setIcebreakerOpen(Boolean((payload as { open: boolean }).open))
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'retro_icebreaker_draws', filter: `session_id=eq.${sessionId}` }, (payload) => {
+        const draw = payload.new as IcebreakerDraw
+        setDraws((current) => current.some((item) => item.author === draw.author) ? current : [...current, { author: draw.author, card: draw.card }])
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'retro_icebreaker_draws', filter: `session_id=eq.${sessionId}` }, (payload) => {
+        setDraws((current) => current.filter((item) => item.author !== (payload.old as IcebreakerDraw).author))
+      })
       .on('broadcast', { event: 'tickets-locked' }, ({ payload }) => {
         setVoteOpen(Boolean((payload as { locked: boolean }).locked))
       })
@@ -244,6 +272,8 @@ function App() {
       .on('broadcast', { event: 'session-ended' }, ({ payload }) => {
         setJoined(false)
         setBackgroundUrl(null)
+        setIcebreakerOpen(false)
+        setDraws([])
         setSessionStatus('invalid')
         setSessionError((payload as { purged?: boolean })?.purged ? 'La rétro est terminée : toutes ses données ont été effacées.' : 'Cette séance est terminée. Scannez le nouveau QR code affiché par l’animateur.')
         setTickets([])
@@ -300,7 +330,7 @@ function App() {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'retro_sessions', filter: `id=eq.${sessionId}` }, (payload) => {
-        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision>; max_votes?: number; action_count?: number; background_url?: string | null }
+        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision>; max_votes?: number; action_count?: number; background_url?: string | null; icebreaker_open?: boolean }
         setZones(row.zones)
         setRetroOpen(row.is_open)
         setVoteOpen(row.vote_open)
@@ -310,6 +340,7 @@ function App() {
         setMaxVotes(row.max_votes ?? 3)
         setActionCount(row.action_count ?? 3)
         setBackgroundUrl(toBackgroundUrl(row.background_url))
+        setIcebreakerOpen(Boolean(row.icebreaker_open))
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -325,6 +356,9 @@ function App() {
             setTicketActions((data.ticket_actions ?? {}) as Record<string, ActionDecision>)
             setMaxVotes(Number(data.max_votes ?? 3))
             setBackgroundUrl(toBackgroundUrl(data.background_url))
+            setIcebreakerOpen(Boolean(data.icebreaker_open))
+            const { data: drawRows } = await client.from('retro_icebreaker_draws').select('author, card').eq('session_id', sessionId)
+            setDraws((drawRows ?? []) as IcebreakerDraw[])
             setActionCount(Number(data.action_count ?? 3))
           }
         }
@@ -479,6 +513,38 @@ function App() {
   const openRetro = () => {
     if (!isAdmin || zones.some((zone) => !zone.name.trim())) return
     void saveSessionConfig({ zones, isOpen: true, voteOpen: false, voteFinished: false, ticketZones: {}, ticketActions: {} })
+    if (icebreakerOpen) void setIcebreaker(false)
+  }
+
+  const setIcebreaker = async (open: boolean) => {
+    if (!isAdmin || !supabase) return
+    setIcebreakerOpen(open)
+    setIcebreakerError('')
+    void channelRef.current?.send({ type: 'broadcast', event: 'icebreaker-changed', payload: { open } })
+    const { error } = await supabase.from('retro_sessions').update({ icebreaker_open: open }).eq('id', sessionId)
+    if (error) setIcebreakerError(`L’ice breaker n’a pas pu être enregistré : ${error.message}`)
+  }
+
+  const drawCard = async () => {
+    if (drawing || !displayName || draws.some((draw) => draw.author === displayName) || !cardImages.length) return
+    setDrawing(true)
+    setIcebreakerError('')
+    await new Promise((resolve) => window.setTimeout(resolve, shuffleDuration()))
+    const allCards = cardImages.map((_, index) => index + 1)
+    // Read the latest draws: others may have drawn during the shuffle.
+    const taken = new Set(drawsRef.current.map((draw) => draw.card))
+    const freeCards = allCards.filter((card) => !taken.has(card))
+    const pool = freeCards.length ? freeCards : allCards
+    const card = pool[Math.floor(Math.random() * pool.length)]
+    setDraws((current) => [...current, { author: displayName, card }])
+    if (supabase) {
+      const { error } = await supabase.from('retro_icebreaker_draws').insert({ session_id: sessionId, author: displayName, card })
+      if (error) {
+        setDraws((current) => current.filter((draw) => draw.author !== displayName))
+        setIcebreakerError(`Le tirage n’a pas pu être enregistré : ${error.message}`)
+      }
+    }
+    setDrawing(false)
   }
 
   const createNewSession = async () => {
@@ -506,6 +572,8 @@ function App() {
     await supabase.from('retro_votes').delete().eq('session_id', sessionId)
     await supabase.from('retro_sessions').delete().eq('id', sessionId)
     setBackgroundUrl(null)
+    setIcebreakerOpen(false)
+    setDraws([])
     setSessionId(nextSessionId)
     setSessionStatus('valid')
     setSessionError('')
@@ -742,6 +810,8 @@ function App() {
     await channelRef.current?.send({ type: 'broadcast', event: 'session-ended', payload: { purged: true } })
     setJoined(false)
     setBackgroundUrl(null)
+    setIcebreakerOpen(false)
+    setDraws([])
     setSessionId('')
     setSessionStatus('idle')
     setSessionError('')
@@ -770,8 +840,13 @@ function App() {
   }
 
   if (!retroOpen) {
+    if (icebreakerOpen) {
+      const myDraw = draws.find((draw) => draw.author === displayName)
+      const waitingUsers = visibleOnlineUsers.filter((user) => !draws.some((draw) => draw.author === user))
+      return <main className="setup-page">{themeToggle(true)}<section className="setup-card icebreaker-card"><p className="eyebrow">🌮 Ice breaker · Taccos</p><h1>Tirez votre <span className="accent">carte.</span></h1><p className="setup-copy">Chacun tire une carte au hasard et explique en quoi elle lui ressemble aujourd’hui.</p>{myDraw ? <div className="card-flip"><img className="card-face card-back" src={cardBack} alt="" /><img className="card-face card-front" src={cardImages[myDraw.card - 1]} alt={`Votre carte Taccos n°${myDraw.card}`} /></div> : <><div className={drawing ? 'deck shuffling' : 'deck'} aria-hidden="true">{Array.from({ length: DECK_SIZE }, (_, index) => <img key={index} src={cardBack} alt="" style={{ '--i': index } as CSSProperties} />)}</div><button type="button" className="primary-button full draw-button" onClick={() => void drawCard()} disabled={drawing}>{drawing ? 'Mélange des cartes…' : 'Tirer ma carte'} <span>→</span></button></>}{icebreakerError && <p className="ticket-error">{icebreakerError}</p>}{draws.some((draw) => draw.author !== displayName) && <div className="draw-grid">{draws.filter((draw) => draw.author !== displayName).map((draw) => <figure key={draw.author}><img src={cardImages[draw.card - 1]} alt={`Carte Taccos de ${draw.author}`} loading="lazy" /><figcaption>{draw.author}</figcaption></figure>)}</div>}{waitingUsers.length > 0 && <p className="draw-waiting">En attente de tirage : {waitingUsers.join(', ')}</p>}{isAdmin ? <button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Passer à la rétro <span>→</span></button> : <p className="draw-waiting">L’animateur lancera la rétro juste après.</p>}</section></main>
+    }
     if (isAdmin) {
-      return <main className="setup-page">{themeToggle(true)}<section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le <span className="accent">QR code.</span></h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="setup-settings"><label>Votes par participant<input type="number" min={1} max={MAX_SETTING} value={maxVotes} onChange={(event) => setMaxVotes(clampSetting(Number(event.target.value)))} /></label><label>Tickets avec action possible<input type="number" min={1} max={MAX_SETTING} value={actionCount} onChange={(event) => setActionCount(clampSetting(Number(event.target.value)))} /></label></div><div className="background-library"><span className="share-label">Image de fond</span><div className="library-grid"><div className={!backgroundUrl ? 'library-item selected' : 'library-item'}><button type="button" onClick={() => void selectBackground(null)}><img src={backgroundImage} alt="" /><span>Image par défaut</span></button></div>{libraryImages.map((image) => <div className={backgroundUrl === image.url ? 'library-item selected' : 'library-item'} key={image.path}><button type="button" onClick={() => void selectBackground(image.url)}><img src={image.url} alt="" loading="lazy" /><span>{image.name}</span></button><button type="button" className="library-delete" aria-label={`Supprimer ${image.name}`} onClick={() => void deleteLibraryImage(image)}>×</button></div>)}<label className="library-item library-upload">{backgroundUploading ? 'Envoi…' : '+ Ajouter une image'}<input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label></div></div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
+      return <main className="setup-page">{themeToggle(true)}<section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le <span className="accent">QR code.</span></h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="setup-settings"><label>Votes par participant<input type="number" min={1} max={MAX_SETTING} value={maxVotes} onChange={(event) => setMaxVotes(clampSetting(Number(event.target.value)))} /></label><label>Tickets avec action possible<input type="number" min={1} max={MAX_SETTING} value={actionCount} onChange={(event) => setActionCount(clampSetting(Number(event.target.value)))} /></label></div><div className="background-library"><span className="share-label">Image de fond</span><div className="library-grid"><div className={!backgroundUrl ? 'library-item selected' : 'library-item'}><button type="button" onClick={() => void selectBackground(null)}><img src={backgroundImage} alt="" /><span>Image par défaut</span></button></div>{libraryImages.map((image) => <div className={backgroundUrl === image.url ? 'library-item selected' : 'library-item'} key={image.path}><button type="button" onClick={() => void selectBackground(image.url)}><img src={image.url} alt="" loading="lazy" /><span>{image.name}</span></button><button type="button" className="library-delete" aria-label={`Supprimer ${image.name}`} onClick={() => void deleteLibraryImage(image)}>×</button></div>)}<label className="library-item library-upload">{backgroundUploading ? 'Envoi…' : '+ Ajouter une image'}<input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label></div></div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="icebreaker-launch" onClick={() => void setIcebreaker(true)}>🌮 Lancer l’ice breaker Taccos</button><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
     }
     return <main className="waiting-page">{themeToggle(true)}<section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Rétro en préparation</p><h1>L’animateur prépare les <span className="accent">zones.</span></h1><p>Cette page s’ouvrira automatiquement dès que la rétro sera lancée.</p></section></main>
   }
