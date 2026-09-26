@@ -112,6 +112,7 @@ function App() {
   const [boardRatio, setBoardRatio] = useState(1672 / 941)
   const [backgroundUploading, setBackgroundUploading] = useState(false)
   const [libraryImages, setLibraryImages] = useState<LibraryImage[]>([])
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [retroOpen, setRetroOpen] = useState(false)
   const [voteFinished, setVoteFinished] = useState(false)
   const [ticketZones, setTicketZones] = useState<Record<string, string>>({})
@@ -751,9 +752,9 @@ function App() {
 
   return (
     <main className="workspace">
-      <header className="workspace-header"><a className="brand" href="#workspace"><span className="logo-mark small">O</span><span>GERetro</span></a><div className="session-title"><span className="live-dot" /> Session en cours <strong>{sessionId}</strong></div><div className="user-chip"><span>{displayName.slice(0, 1).toUpperCase()}</span><div><strong>{displayName}</strong><small>{isAdmin ? 'Animateur · admin' : 'Participant'}</small></div><button className="logout-button" onClick={() => setJoined(false)}>Changer</button></div></header>
-      <div className="workspace-layout">
-        <aside className="sidebar">
+      <header className="workspace-header"><div className="header-left"><button type="button" className="burger-button" aria-label={sidebarOpen ? 'Masquer le menu' : 'Afficher le menu'} aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><span /><span /><span /></button><a className="brand" href="#workspace"><span className="logo-mark small">O</span><span>GERetro</span></a></div><div className="session-title"><span className="live-dot" /> Session en cours <strong>{sessionId}</strong></div><div className="user-chip"><span>{displayName.slice(0, 1).toUpperCase()}</span><div><strong>{displayName}</strong><small>{isAdmin ? 'Animateur · admin' : 'Participant'}</small></div><button className="logout-button" onClick={() => setJoined(false)}>Changer</button></div></header>
+      <div className={sidebarOpen ? 'workspace-layout' : 'workspace-layout sidebar-hidden'}>
+        {sidebarOpen && <aside className="sidebar">
           <div className="side-heading"><div><p className="eyebrow">Espace de travail</p><h2>Vos tickets</h2></div><span className="ticket-count">{tickets.length}</span></div>
           <div className="online-panel"><div className="online-heading"><span><i className="live-dot" /> Dans la rétro</span><strong>{visibleOnlineUsers.length}</strong></div><div className="online-list">{visibleOnlineUsers.map((user) => <span className={user === displayName ? 'online-user current' : 'online-user'} key={user}><i />{user}{user === displayName && <small>vous</small>}</span>)}</div></div>
           <p className="side-help">Écrivez ce que vous voulez déposer sur la carte. Les tickets privés ne sont visibles que par vous.</p>
@@ -765,7 +766,7 @@ function App() {
           <div className="side-divider" />
           <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
           {isAdmin ? <><label className="background-button">{backgroundUploading ? 'Envoi de l’image…' : 'Changer l’image de fond'} <span>🖼</span><input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label>{backgroundUrl && <button className="background-reset" onClick={() => void resetBackground()}>Rétablir l’image par défaut</button>}<button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button><button className="purge-button" onClick={() => void purgeSession()}>Terminer et tout effacer <span>✕</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
-        </aside>
+        </aside>}
         <section className="board-area">
           {isAdmin && <div className="dashboard-share"><div><span className="share-label">Lien participant</span><strong>Invitez l’équipe à rejoindre la séance</strong></div><a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></div>}
           <div className="board-stage"><div className="image-board custom-image" style={{ backgroundImage: `url("${boardImage}")`, '--board-ratio': boardRatio } as CSSProperties} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}>
