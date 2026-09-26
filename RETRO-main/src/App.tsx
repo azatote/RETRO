@@ -47,13 +47,16 @@ const BACKGROUND_BUCKET = 'retro-backgrounds'
 const BACKGROUND_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 const BACKGROUND_MAX_BYTES = 5 * 1024 * 1024
 const toBackgroundUrl = (value: unknown) => typeof value === 'string' && value.startsWith('https://') ? value : null
-const removeSessionBackgrounds = async (id: string, keepPath?: string) => {
-  if (!supabase || !id) return null
-  const { data, error } = await supabase.storage.from(BACKGROUND_BUCKET).list(id)
-  if (error) return error
-  const paths = (data ?? []).map((file) => `${id}/${file.name}`).filter((path) => path !== keepPath)
-  if (!paths.length) return null
-  return (await supabase.storage.from(BACKGROUND_BUCKET).remove(paths)).error
+const LIBRARY_FOLDER = 'library'
+type LibraryImage = { path: string; url: string; name: string }
+const fetchLibrary = async (): Promise<LibraryImage[]> => {
+  const client = supabase
+  if (!client) return []
+  const { data } = await client.storage.from(BACKGROUND_BUCKET).list(LIBRARY_FOLDER, { limit: 100, sortBy: { column: 'created_at', order: 'desc' } })
+  return (data ?? []).filter((file) => file.id && !file.name.startsWith('.')).map((file) => {
+    const path = `${LIBRARY_FOLDER}/${file.name}`
+    return { path, name: file.name.replace(/^\d+-/, '').replace(/\.[^.]+$/, ''), url: client.storage.from(BACKGROUND_BUCKET).getPublicUrl(path).data.publicUrl }
+  })
 }
 const createSessionKey = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()
 const requestedSessionKey = new URLSearchParams(window.location.search).get('session')?.trim().toUpperCase() ?? ''
@@ -108,6 +111,7 @@ function App() {
   const [backgroundUrl, setBackgroundUrl] = useState<string | null>(null)
   const [boardRatio, setBoardRatio] = useState(1672 / 941)
   const [backgroundUploading, setBackgroundUploading] = useState(false)
+  const [libraryImages, setLibraryImages] = useState<LibraryImage[]>([])
   const [retroOpen, setRetroOpen] = useState(false)
   const [voteFinished, setVoteFinished] = useState(false)
   const [ticketZones, setTicketZones] = useState<Record<string, string>>({})
@@ -133,6 +137,13 @@ function App() {
     image.src = boardImage
     return () => { active = false }
   }, [boardImage])
+
+  useEffect(() => {
+    if (!isAdmin || !joined || retroOpen) return
+    let active = true
+    void fetchLibrary().then((images) => { if (active) setLibraryImages(images) })
+    return () => { active = false }
+  }, [isAdmin, joined, retroOpen])
 
   useEffect(() => {
     if (!shareUrl) return
@@ -474,7 +485,6 @@ function App() {
       return
     }
     await channelRef.current?.send({ type: 'broadcast', event: 'session-ended', payload: {} })
-    await removeSessionBackgrounds(sessionId)
     await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
     await supabase.from('retro_votes').delete().eq('session_id', sessionId)
     await supabase.from('retro_sessions').delete().eq('id', sessionId)
@@ -659,29 +669,45 @@ function App() {
       return
     }
     setBackgroundUploading(true)
-    const path = `${sessionId}/${crypto.randomUUID()}.${file.type.split('/')[1]}`
+    const baseName = file.name.replace(/\.[^.]+$/, '').normalize('NFD').replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'image'
+    const path = `${LIBRARY_FOLDER}/${Date.now()}-${baseName}.${file.type.split('/')[1]}`
     const upload = await supabase.storage.from(BACKGROUND_BUCKET).upload(path, file, { contentType: file.type })
     const error = upload.error?.message ?? await applyBackground(supabase.storage.from(BACKGROUND_BUCKET).getPublicUrl(path).data.publicUrl)
     if (error) window.alert(`L’image n’a pas pu être enregistrée : ${error}`)
-    else await removeSessionBackgrounds(sessionId, path)
+    setLibraryImages(await fetchLibrary())
     setBackgroundUploading(false)
+  }
+
+  const selectBackground = async (url: string | null) => {
+    if (!isAdmin || url === backgroundUrl) return
+    const error = await applyBackground(url)
+    if (error) window.alert(`L’image n’a pas pu être appliquée : ${error}`)
+  }
+
+  const deleteLibraryImage = async (image: LibraryImage) => {
+    if (!isAdmin || !supabase || !window.confirm(`Supprimer définitivement « ${image.name} » de la bibliothèque ?`)) return
+    const { error } = await supabase.storage.from(BACKGROUND_BUCKET).remove([image.path])
+    if (error) {
+      window.alert(`L’image n’a pas pu être supprimée : ${error.message}`)
+      return
+    }
+    if (backgroundUrl === image.url) await applyBackground(null)
+    setLibraryImages((current) => current.filter((item) => item.path !== image.path))
   }
 
   const resetBackground = async () => {
     if (!isAdmin) return
     const error = await applyBackground(null)
     if (error) window.alert(`L’image par défaut n’a pas pu être rétablie : ${error}`)
-    else await removeSessionBackgrounds(sessionId)
   }
 
   const purgeSession = async () => {
     if (!isAdmin || !supabase) return
-    if (!window.confirm('Terminer la rétro et effacer définitivement toutes ses données (tickets, votes, zones, actions, image de fond) ?\n\nTéléchargez le Markdown avant : cette action est irréversible.')) return
-    const backgroundError = await removeSessionBackgrounds(sessionId)
+    if (!window.confirm('Terminer la rétro et effacer définitivement toutes ses données (tickets, votes, zones, actions) ?\n\nLes images de la bibliothèque sont conservées. Téléchargez le Markdown avant : cette action est irréversible.')) return
     const votes = await supabase.from('retro_votes').delete().eq('session_id', sessionId)
     const ticketsResult = await supabase.from('retro_tickets').delete().eq('session_id', sessionId)
     const session = await supabase.from('retro_sessions').delete().eq('id', sessionId)
-    const error = backgroundError ?? votes.error ?? ticketsResult.error ?? session.error
+    const error = votes.error ?? ticketsResult.error ?? session.error
     if (error) {
       window.alert(`Les données n’ont pas pu être entièrement effacées : ${error.message}`)
       return
@@ -718,7 +744,7 @@ function App() {
 
   if (!retroOpen) {
     if (isAdmin) {
-      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le QR code.</h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="setup-settings"><label>Votes par participant<input type="number" min={1} max={MAX_SETTING} value={maxVotes} onChange={(event) => setMaxVotes(clampSetting(Number(event.target.value)))} /></label><label>Tickets avec action possible<input type="number" min={1} max={MAX_SETTING} value={actionCount} onChange={(event) => setActionCount(clampSetting(Number(event.target.value)))} /></label></div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
+      return <main className="setup-page"><section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le QR code.</h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="setup-settings"><label>Votes par participant<input type="number" min={1} max={MAX_SETTING} value={maxVotes} onChange={(event) => setMaxVotes(clampSetting(Number(event.target.value)))} /></label><label>Tickets avec action possible<input type="number" min={1} max={MAX_SETTING} value={actionCount} onChange={(event) => setActionCount(clampSetting(Number(event.target.value)))} /></label></div><div className="background-library"><span className="share-label">Image de fond</span><div className="library-grid"><div className={!backgroundUrl ? 'library-item selected' : 'library-item'}><button type="button" onClick={() => void selectBackground(null)}><img src={backgroundImage} alt="" /><span>Image par défaut</span></button></div>{libraryImages.map((image) => <div className={backgroundUrl === image.url ? 'library-item selected' : 'library-item'} key={image.path}><button type="button" onClick={() => void selectBackground(image.url)}><img src={image.url} alt="" loading="lazy" /><span>{image.name}</span></button><button type="button" className="library-delete" aria-label={`Supprimer ${image.name}`} onClick={() => void deleteLibraryImage(image)}>×</button></div>)}<label className="library-item library-upload">{backgroundUploading ? 'Envoi…' : '+ Ajouter une image'}<input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label></div></div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
     }
     return <main className="waiting-page"><section className="waiting-card"><span className="live-dot" /><p className="eyebrow">Rétro en préparation</p><h1>L’animateur prépare les zones.</h1><p>Cette page s’ouvrira automatiquement dès que la rétro sera lancée.</p></section></main>
   }

@@ -349,13 +349,13 @@ create policy "Anyone can read retro backgrounds"
   to anon, authenticated
   using (bucket_id = 'retro-backgrounds');
 
--- Uploads only into the folder of an existing session.
+-- Uploads only into the shared image library folder.
 create policy "Anyone can upload retro backgrounds"
   on storage.objects for insert
   to anon, authenticated
   with check (
     bucket_id = 'retro-backgrounds'
-    and exists (select 1 from public.retro_sessions s where s.id = (storage.foldername(name))[1])
+    and (storage.foldername(name))[1] = 'library'
   );
 
 create policy "Anyone can delete retro backgrounds"
