@@ -32,7 +32,7 @@ type BoardEvent = { ticketId: number | string; author: string }
 type RemoteVote = { id: number; ticket_id: number; author: string }
 type Zone = { id: string; name: string; color: string }
 type ActionDecision = { status: 'action' | 'none'; text: string }
-type SessionConfig = { zones: Zone[]; isOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string>; ticketActions: Record<string, ActionDecision> }
+type SessionConfig = { zones: Zone[]; isOpen: boolean; voteOpen: boolean; voteFinished: boolean; ticketZones: Record<string, string>; ticketActions: Record<string, ActionDecision> }
 type SessionStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
 const colors = ['#ffd166', '#ff9f9a', '#9ee7d1', '#b7c9ff']
@@ -167,6 +167,7 @@ function App() {
         const config = payload as SessionConfig
         setZones(config.zones)
         setRetroOpen(config.isOpen)
+        setVoteOpen(config.voteOpen)
         setVoteFinished(config.voteFinished)
         setTicketZones(config.ticketZones)
         setTicketActions(config.ticketActions ?? {})
@@ -229,9 +230,10 @@ function App() {
         setTickets((current) => current.filter((item) => item.id !== payload.old.id))
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'retro_sessions', filter: `id=eq.${sessionId}` }, (payload) => {
-        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision> }
+        const row = payload.new as { zones: Zone[]; is_open: boolean; vote_open: boolean; vote_finished: boolean; ticket_zones: Record<string, string>; ticket_actions: Record<string, ActionDecision> }
         setZones(row.zones)
         setRetroOpen(row.is_open)
+        setVoteOpen(row.vote_open)
         setVoteFinished(row.vote_finished)
         setTicketZones(row.ticket_zones)
         setTicketActions(row.ticket_actions ?? {})
@@ -244,6 +246,7 @@ function App() {
           if (data) {
             setZones(data.zones as Zone[])
             setRetroOpen(Boolean(data.is_open))
+            setVoteOpen(Boolean(data.vote_open))
             setVoteFinished(Boolean(data.vote_finished))
             setTicketZones((data.ticket_zones ?? {}) as Record<string, string>)
             setTicketActions((data.ticket_actions ?? {}) as Record<string, ActionDecision>)
@@ -281,6 +284,7 @@ function App() {
         id: nextSessionId,
         zones: defaultZones,
         is_open: false,
+        vote_open: false,
         vote_finished: false,
         ticket_zones: {},
         ticket_actions: {},
@@ -309,7 +313,15 @@ function App() {
     setDraft('')
 
     if (supabase) {
-      const { data, error } = await supabase.from('retro_tickets').insert({ session_id: sessionId, ...ticket, is_private: ticket.private }).select().single()
+      const { data, error } = await supabase.from('retro_tickets').insert({
+        session_id: sessionId,
+        text: ticket.text,
+        author: ticket.author,
+        color: ticket.color,
+        x: ticket.x,
+        y: ticket.y,
+        is_private: ticket.private,
+      }).select().single()
       if (error || !data) {
         setTickets((current) => current.filter((item) => item.id !== temporaryId))
         setTicketError(error?.message ?? 'Le ticket n’a pas pu être enregistré.')
@@ -341,18 +353,19 @@ function App() {
     const nextValue = !voteOpen
     setVoteOpen(nextValue)
     void channelRef.current?.send({ type: 'broadcast', event: 'tickets-locked', payload: { locked: nextValue } })
-    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: false, ticketZones, ticketActions })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteOpen: nextValue, voteFinished: false, ticketZones, ticketActions })
   }
 
   const saveSessionConfig = async (config: SessionConfig) => {
     setZones(config.zones)
     setRetroOpen(config.isOpen)
+    setVoteOpen(config.voteOpen)
     setVoteFinished(config.voteFinished)
     setTicketZones(config.ticketZones)
     setTicketActions(config.ticketActions)
     void channelRef.current?.send({ type: 'broadcast', event: 'session-configured', payload: config })
     if (supabase) {
-      await supabase.from('retro_sessions').upsert({ id: sessionId, zones: config.zones, is_open: config.isOpen, vote_finished: config.voteFinished, ticket_zones: config.ticketZones, ticket_actions: config.ticketActions })
+      await supabase.from('retro_sessions').upsert({ id: sessionId, zones: config.zones, is_open: config.isOpen, vote_open: config.voteOpen, vote_finished: config.voteFinished, ticket_zones: config.ticketZones, ticket_actions: config.ticketActions })
     }
   }
 
@@ -360,13 +373,13 @@ function App() {
     if (!isAdmin || !voteOpen) return
     setVoteOpen(false)
     void channelRef.current?.send({ type: 'broadcast', event: 'tickets-locked', payload: { locked: false } })
-    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished: true, ticketZones, ticketActions })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteOpen: false, voteFinished: true, ticketZones, ticketActions })
   }
 
   const assignTicketZone = (ticketId: number | string, zoneId: string) => {
     if (!isAdmin || !voteFinished) return
     const nextZones = { ...ticketZones, [String(ticketId)]: zoneId }
-    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished, ticketZones: nextZones, ticketActions })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteOpen, voteFinished, ticketZones: nextZones, ticketActions })
     void channelRef.current?.send({ type: 'broadcast', event: 'ticket-zone-changed', payload: { ticketId, zoneId } })
   }
 
@@ -376,7 +389,7 @@ function App() {
 
   const openRetro = () => {
     if (!isAdmin || zones.some((zone) => !zone.name.trim())) return
-    void saveSessionConfig({ zones, isOpen: true, voteFinished: false, ticketZones: {}, ticketActions: {} })
+    void saveSessionConfig({ zones, isOpen: true, voteOpen: false, voteFinished: false, ticketZones: {}, ticketActions: {} })
   }
 
   const createNewSession = async () => {
@@ -390,6 +403,7 @@ function App() {
       id: nextSessionId,
       zones: defaultZones,
       is_open: false,
+      vote_open: false,
       vote_finished: false,
       ticket_zones: {},
       ticket_actions: {},
@@ -426,7 +440,7 @@ function App() {
   const updateTicketAction = (ticketId: number | string, nextDecision: ActionDecision) => {
     if (!isAdmin || !voteFinished || !topVotedIds.has(String(ticketId))) return
     const nextActions = { ...ticketActions, [String(ticketId)]: nextDecision }
-    void saveSessionConfig({ zones, isOpen: retroOpen, voteFinished, ticketZones, ticketActions: nextActions })
+    void saveSessionConfig({ zones, isOpen: retroOpen, voteOpen, voteFinished, ticketZones, ticketActions: nextActions })
   }
 
   const voteForTicket = (ticketId: number | string) => {

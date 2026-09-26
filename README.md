@@ -5,6 +5,7 @@ Interface React/TypeScript construite avec Vite, prete a etre versionnee dans Gi
 ## Developpement local
 
 ```bash
+cd RETRO-main
 npm install
 npm run dev
 ```
@@ -18,19 +19,13 @@ npm run build
 
 ## Deploiement Vercel
 
-Dans Vercel, importer le depot Git puis conserver les valeurs suivantes :
-
-- Framework preset : `Vite`
-- Build command : `npm run build`
-- Output directory : `dist`
-- Install command : `npm install`
-
-Aucune configuration `vercel.json` n'est necessaire pour cette application frontend statique.
+Le fichier `vercel.json` a la racine configure l'installation, le build et le dossier de sortie de `RETRO-main`.
 
 ## Activer le temps reel avec Supabase
 
 1. Creer un projet sur Supabase.
-2. Ouvrir le SQL Editor et executer le contenu de `supabase-schema.sql`.
+2. Ouvrir le SQL Editor et executer tout le contenu de `RETRO-main/supabase-schema.sql`.
+	Le script est idempotent : le reexecuter applique aussi les migrations aux tables existantes.
 3. Ajouter ces variables dans Vercel, dans **Settings > Environment Variables** :
 
 ```text
@@ -40,4 +35,4 @@ VITE_SUPABASE_ANON_KEY=votre-cle-anon
 
 4. Relancer un redeploiement Vercel.
 
-Sans ces variables, l'application fonctionne en mode local. Avec elles, les tickets crees et deplaces sont synchronises entre les fenetres ouvertes sur la meme session.
+Sans ces variables, la creation et la validation des seances par QR code sont indisponibles.
