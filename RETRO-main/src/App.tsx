@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ChangeEvent, CSSProperties, DragEvent } from 'react'
+import type { ChangeEvent, CSSProperties, DragEvent, PointerEvent as ReactPointerEvent } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import QRCode from 'qrcode'
 import backgroundImage from './assets/heart-of-the-team.png'
@@ -125,6 +125,9 @@ function App() {
   const [maxVotes, setMaxVotes] = useState(3)
   const [actionCount, setActionCount] = useState(3)
   const [backgroundUrl, setBackgroundUrl] = useState<string | null>(null)
+  const [backgroundZoom, setBackgroundZoom] = useState(1.5)
+  const [boardPan, setBoardPan] = useState({ x: 0, y: 0 })
+  const [isPanning, setIsPanning] = useState(false)
   const [boardRatio, setBoardRatio] = useState(1672 / 941)
   const [backgroundUploading, setBackgroundUploading] = useState(false)
   const [libraryImages, setLibraryImages] = useState<LibraryImage[]>([])
@@ -145,6 +148,8 @@ function App() {
   const [editingText, setEditingText] = useState('')
   const [qrCodeUrl, setQrCodeUrl] = useState('')
   const channelRef = useRef<RealtimeChannel | null>(null)
+  const boardRef = useRef<HTMLDivElement | null>(null)
+  const panStartRef = useRef<{ pointerId: number; clientX: number; clientY: number; x: number; y: number } | null>(null)
   const normalizedPseudo = pseudo.trim()
   const isAdmin = !isParticipantAccess
   const displayName = normalizedPseudo.replace(/^@/, '')
@@ -160,6 +165,29 @@ function App() {
     document.documentElement.dataset.theme = theme
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
+
+  useEffect(() => {
+    const board = boardRef.current
+    if (!board) return
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const rect = board.getBoundingClientRect()
+      const nextZoom = Math.max(1, Math.min(3, backgroundZoom * Math.exp(-event.deltaY * 0.001)))
+      if (nextZoom === backgroundZoom) return
+      const cursorX = event.clientX - rect.left - board.clientLeft - board.clientWidth / 2
+      const cursorY = event.clientY - rect.top - board.clientTop - board.clientHeight / 2
+      const nextX = cursorX - ((cursorX - boardPan.x) / backgroundZoom) * nextZoom
+      const nextY = cursorY - ((cursorY - boardPan.y) / backgroundZoom) * nextZoom
+      const maxX = (board.clientWidth * (nextZoom - 1)) / 2
+      const maxY = (board.clientHeight * (nextZoom - 1)) / 2
+      setBoardPan({ x: Math.max(-maxX, Math.min(maxX, nextX)), y: Math.max(-maxY, Math.min(maxY, nextY)) })
+      setBackgroundZoom(nextZoom)
+    }
+
+    board.addEventListener('wheel', handleWheel, { passive: false })
+    return () => board.removeEventListener('wheel', handleWheel)
+  }, [backgroundZoom, boardPan.x, boardPan.y, joined, retroOpen])
 
   const themeToggle = (floating: boolean) => <button type="button" className={floating ? 'theme-toggle floating' : 'theme-toggle'} aria-label={theme === 'dark' ? 'Activer le thème clair' : 'Activer le thème sombre'} title={theme === 'dark' ? 'Thème clair' : 'Thème sombre'} onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀️' : '🌙'}</button>
 
@@ -384,11 +412,9 @@ function App() {
     }
 
     if (!supabase) {
-      setSessionError('Configurez Supabase pour créer une séance accessible par QR code.')
-      return
-    }
-
-    if (!sessionId) {
+      if (!sessionId) setSessionId(createSessionKey())
+      setSessionStatus('valid')
+    } else if (!sessionId) {
       const nextSessionId = createSessionKey()
       const { error } = await supabase.from('retro_sessions').insert({
         id: nextSessionId,
@@ -449,13 +475,44 @@ function App() {
     const draggedTicket = tickets.find((ticket) => ticket.id === draggedId)
     if (!draggedTicket || (!isAdmin && draggedTicket.author !== displayName)) return
     const board = event.currentTarget.getBoundingClientRect()
-    const x = Math.max(4, Math.min(84, ((event.clientX - board.left) / board.width) * 100 - 8))
-    const y = Math.max(4, Math.min(82, ((event.clientY - board.top) / board.height) * 100 - 7))
+    const boardElement = event.currentTarget
+    const screenX = event.clientX - board.left - boardElement.clientLeft
+    const screenY = event.clientY - board.top - boardElement.clientTop
+    const canvasX = (screenX - boardElement.clientWidth / 2 - boardPan.x) / backgroundZoom + boardElement.clientWidth / 2
+    const canvasY = (screenY - boardElement.clientHeight / 2 - boardPan.y) / backgroundZoom + boardElement.clientHeight / 2
+    const x = Math.max(4, Math.min(84, (canvasX / boardElement.clientWidth) * 100 - 8))
+    const y = Math.max(4, Math.min(82, (canvasY / boardElement.clientHeight) * 100 - 7))
     setTickets((current) => current.map((ticket) => ticket.id === draggedId ? { ...ticket, x, y } : ticket))
     if (supabase && typeof draggedId === 'number') {
       void channelRef.current?.send({ type: 'broadcast', event: 'ticket-moved', payload: { id: draggedId, author: draggedTicket.author, x, y } })
       void supabase.from('retro_tickets').update({ x, y }).eq('id', draggedId)
     }
+  }
+
+  const startBoardPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || backgroundZoom <= 1 || (event.target instanceof Element && event.target.closest('.ticket'))) return
+    panStartRef.current = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, x: boardPan.x, y: boardPan.y }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsPanning(true)
+  }
+
+  const panBoard = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = panStartRef.current
+    if (!start || start.pointerId !== event.pointerId) return
+    const board = event.currentTarget
+    const maxX = (board.clientWidth * (backgroundZoom - 1)) / 2
+    const maxY = (board.clientHeight * (backgroundZoom - 1)) / 2
+    setBoardPan({
+      x: Math.max(-maxX, Math.min(maxX, start.x + event.clientX - start.clientX)),
+      y: Math.max(-maxY, Math.min(maxY, start.y + event.clientY - start.clientY)),
+    })
+  }
+
+  const stopBoardPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (panStartRef.current?.pointerId !== event.pointerId) return
+    panStartRef.current = null
+    setIsPanning(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
   }
 
   const toggleVote = () => {
@@ -593,6 +650,7 @@ function App() {
     const voteDifference = voteCountFor(right.id).length - voteCountFor(left.id).length
     return voteDifference || tickets.indexOf(left) - tickets.indexOf(right)
   }).slice(0, actionCount)
+  const ticketScale = Math.max(0.45, 1 - Math.max(0, tickets.length - 4) * 0.012)
   const topVotedIds = new Set(topVotedTickets.map((ticket) => String(ticket.id)))
   const votesLabel = `${maxVotes} vote${maxVotes > 1 ? 's' : ''}`
 
@@ -836,7 +894,7 @@ function App() {
   }
 
   if (!joined) {
-    return <main className="login-page">{themeToggle(true)}<div className="login-card"><div className="logo-mark">O</div><p className="eyebrow">{isAdmin ? 'Démarrage animateur' : `Séance ${sessionId}`}</p><h1>{isAdmin ? <>Créez la séance avant d’accueillir <span className="accent">l’équipe.</span></> : <>Rejoignez la <span className="accent">rétro.</span></>}</h1><p className="login-copy">{isAdmin ? 'Votre connexion crée immédiatement une séance unique et son QR code. Les participants ne pourront entrer qu’en le scannant.' : 'Ce QR code a été validé. Choisissez votre pseudo pour rejoindre la séance de l’animateur.'}</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void joinSession()} placeholder={isAdmin ? 'Ex. Camille' : 'Ex. Morgan'} maxLength={24} />{sessionError && <p className="ticket-error">{sessionError}</p>}<button className="primary-button full" onClick={() => void joinSession()} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim()) || (isParticipantAccess && sessionStatus !== 'valid')}>{isAdmin ? 'Créer la séance et générer le QR' : 'Rejoindre la rétro'} <span>→</span></button><span className="privacy-note">🔒 {isSupabaseConfigured ? 'Accès sécurisé par la clé du QR code' : 'Supabase requis pour créer et valider les séances'}</span></div></main>
+    return <main className="login-page">{themeToggle(true)}<div className="login-card"><div className="logo-mark">O</div><p className="eyebrow">{isAdmin ? isSupabaseConfigured ? 'Démarrage animateur' : 'Test local' : `Séance ${sessionId}`}</p><h1>{isAdmin ? isSupabaseConfigured ? <>Créez la séance avant d’accueillir <span className="accent">l’équipe.</span></> : <>Testez le tableau en <span className="accent">local.</span></> : <>Rejoignez la <span className="accent">rétro.</span></>}</h1><p className="login-copy">{isAdmin ? isSupabaseConfigured ? 'Votre connexion crée immédiatement une séance unique et son QR code. Les participants ne pourront entrer qu’en le scannant.' : 'Cette séance de test reste dans ce navigateur. Elle ne sera ni synchronisée ni conservée après rechargement.' : 'Ce QR code a été validé. Choisissez votre pseudo pour rejoindre la séance de l’animateur.'}</p><label htmlFor="pseudo">Votre pseudo</label><input id="pseudo" autoFocus value={pseudo} onChange={(event) => setPseudo(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void joinSession()} placeholder={isAdmin ? 'Ex. Camille' : 'Ex. Morgan'} maxLength={24} />{sessionError && <p className="ticket-error">{sessionError}</p>}<button className="primary-button full" onClick={() => void joinSession()} disabled={!/^@?[a-zA-Z0-9À-ÿ][a-zA-Z0-9À-ÿ _-]{1,23}$/.test(pseudo.trim()) || (isParticipantAccess && sessionStatus !== 'valid')}>{isAdmin ? isSupabaseConfigured ? 'Créer la séance et générer le QR' : 'Ouvrir le tableau de test' : 'Rejoindre la rétro'} <span>→</span></button><span className="privacy-note">{isSupabaseConfigured ? 'Accès sécurisé par la clé du QR code' : 'Mode local · Supabase déconnecté'}</span></div></main>
   }
 
   if (!retroOpen) {
@@ -844,6 +902,9 @@ function App() {
       const myDraw = draws.find((draw) => draw.author === displayName)
       const waitingUsers = visibleOnlineUsers.filter((user) => !draws.some((draw) => draw.author === user))
       return <main className="setup-page">{themeToggle(true)}<section className="setup-card icebreaker-card"><p className="eyebrow">🌮 Ice breaker · Taccos</p><h1>Tirez votre <span className="accent">carte.</span></h1><p className="setup-copy">Chacun tire une carte au hasard et explique en quoi elle lui ressemble aujourd’hui.</p>{myDraw ? <div className="card-flip"><img className="card-face card-back" src={cardBack} alt="" /><img className="card-face card-front" src={cardImages[myDraw.card - 1]} alt={`Votre carte Taccos n°${myDraw.card}`} /></div> : <><div className={drawing ? 'deck shuffling' : 'deck'} aria-hidden="true">{Array.from({ length: DECK_SIZE }, (_, index) => <img key={index} src={cardBack} alt="" style={{ '--i': index } as CSSProperties} />)}</div><button type="button" className="primary-button full draw-button" onClick={() => void drawCard()} disabled={drawing}>{drawing ? 'Mélange des cartes…' : 'Tirer ma carte'} <span>→</span></button></>}{icebreakerError && <p className="ticket-error">{icebreakerError}</p>}{draws.some((draw) => draw.author !== displayName) && <div className="draw-grid">{draws.filter((draw) => draw.author !== displayName).map((draw) => <figure key={draw.author}><img src={cardImages[draw.card - 1]} alt={`Carte Taccos de ${draw.author}`} loading="lazy" /><figcaption>{draw.author}</figcaption></figure>)}</div>}{waitingUsers.length > 0 && <p className="draw-waiting">En attente de tirage : {waitingUsers.join(', ')}</p>}{isAdmin ? <button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Passer à la rétro <span>→</span></button> : <p className="draw-waiting">L’animateur lancera la rétro juste après.</p>}</section></main>
+    }
+    if (isAdmin && !supabase) {
+      return <main className="setup-page">{themeToggle(true)}<section className="setup-card"><p className="eyebrow">Mode test local</p><h1>Le tableau est prêt.</h1><p className="setup-copy">Les tickets seront visibles uniquement dans cet onglet. Le QR code, la synchronisation et la sauvegarde Supabase sont désactivés.</p><button type="button" className="primary-button full" onClick={openRetro}>Ouvrir le tableau <span>→</span></button></section></main>
     }
     if (isAdmin) {
       return <main className="setup-page">{themeToggle(true)}<section className="setup-card"><p className="eyebrow">Séance créée · partage immédiat</p><h1>Faites scanner le <span className="accent">QR code.</span></h1><p className="setup-copy">C’est l’unique accès participant à cette séance. Vous pouvez ensuite ajuster les zones et ouvrir la rétro.</p><div className="session-share"><div><span className="share-label">Clé de séance</span><strong>{sessionId}</strong><small>Accès participant exclusivement par ce QR code</small></div>{qrCodeUrl && <img src={qrCodeUrl} alt={`QR code de la séance ${sessionId}`} />}</div><div className="setup-settings"><label>Votes par participant<input type="number" min={1} max={MAX_SETTING} value={maxVotes} onChange={(event) => setMaxVotes(clampSetting(Number(event.target.value)))} /></label><label>Tickets avec action possible<input type="number" min={1} max={MAX_SETTING} value={actionCount} onChange={(event) => setActionCount(clampSetting(Number(event.target.value)))} /></label></div><div className="background-library"><span className="share-label">Image de fond</span><div className="library-grid"><div className={!backgroundUrl ? 'library-item selected' : 'library-item'}><button type="button" onClick={() => void selectBackground(null)}><img src={backgroundImage} alt="" /><span>Image par défaut</span></button></div>{libraryImages.map((image) => <div className={backgroundUrl === image.url ? 'library-item selected' : 'library-item'} key={image.path}><button type="button" onClick={() => void selectBackground(image.url)}><img src={image.url} alt="" loading="lazy" /><span>{image.name}</span></button><button type="button" className="library-delete" aria-label={`Supprimer ${image.name}`} onClick={() => void deleteLibraryImage(image)}>×</button></div>)}<label className="library-item library-upload">{backgroundUploading ? 'Envoi…' : '+ Ajouter une image'}<input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label></div></div><div className="zone-config-list">{zones.map((zone, index) => <label className="zone-config" key={zone.id}><span className="zone-swatch" style={{ background: zone.color }} />Zone {index + 1}<input value={zone.name} onChange={(event) => updateZoneName(zone.id, event.target.value)} maxLength={32} /></label>)}</div><button type="button" className="icebreaker-launch" onClick={() => void setIcebreaker(true)}>🌮 Lancer l’ice breaker Taccos</button><button type="button" className="primary-button full" onClick={openRetro} disabled={zones.some((zone) => !zone.name.trim())}>Ouvrir la rétro aux participants <span>→</span></button><button type="button" className="new-session-button" onClick={() => void createNewSession()}>Créer une nouvelle séance</button>{sessionError && <p className="ticket-error">{sessionError}</p>}<small className="share-url">{shareUrl}</small></section></main>
@@ -854,9 +915,10 @@ function App() {
   return (
     <main className="workspace">
       <header className="workspace-header"><div className="header-left"><button type="button" className="burger-button" aria-label={sidebarOpen ? 'Masquer le menu' : 'Afficher le menu'} aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><span /><span /><span /></button><a className="brand" href="#workspace"><span className="logo-mark small">O</span><span>GERetro</span></a></div><div className="session-title"><span className="live-dot" /> Session en cours <strong>{sessionId}</strong></div><div className="user-chip">{themeToggle(false)}<span>{displayName.slice(0, 1).toUpperCase()}</span><div><strong>{displayName}</strong><small>{isAdmin ? 'Animateur · admin' : 'Participant'}</small></div><button className="logout-button" onClick={() => setJoined(false)}>Changer</button></div></header>
+      {!supabase && <p className="admin-note">Mode test local : tickets non synchronisés, perdus au rechargement.</p>}
       <div className={sidebarOpen ? 'workspace-layout' : 'workspace-layout sidebar-hidden'}>
         {sidebarOpen && <aside className="sidebar">
-          <div className="side-heading"><div><p className="eyebrow">Espace de travail</p>{isAdmin && <button type="button" className="copy-link-button" onClick={() => void copyShareUrl()}>{linkCopied ? 'Lien copié ✓' : 'Copier le lien'}</button>}<h2>Vos tickets</h2></div><span className="ticket-count">{tickets.length}</span></div>
+          <div className="side-heading"><div><p className="eyebrow">Espace de travail</p>{isAdmin && supabase && <button type="button" className="copy-link-button" onClick={() => void copyShareUrl()}>{linkCopied ? 'Lien copié ✓' : 'Copier le lien'}</button>}<h2>Vos tickets</h2></div><span className="ticket-count">{tickets.length}</span></div>
           <div className="online-panel"><div className="online-heading"><span><i className="live-dot" /> Dans la rétro</span><strong>{visibleOnlineUsers.length}</strong></div><div className="online-list">{visibleOnlineUsers.map((user) => <span className={user === displayName ? 'online-user current' : 'online-user'} key={user}><i />{user}{user === displayName && <small>vous</small>}</span>)}</div></div>
           <p className="side-help">Écrivez ce que vous voulez déposer sur la carte. Les tickets privés ne sont visibles que par vous.</p>
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Une idée, un ressenti, un fait..." rows={4} maxLength={160} disabled={voteOpen} />
@@ -866,10 +928,11 @@ function App() {
           <div className="vote-panel"><strong>{voteOpen ? 'Phase 2 · Vote' : 'Phase 1 · Collecte'}</strong><small>{voteOpen ? `Votez une fois par ticket, avec ${votesLabel} au total.` : 'L’animateur lance le vote quand les tickets sont prêts.'}</small><span className="vote-total">Mes votes : {voteTotalFor(displayName)}/{maxVotes}</span></div>
           <div className="side-divider" />
           <div className="legend"><span><i className="legend-dot private" /> Privé</span><span><i className="legend-dot public" /> Révélé</span></div>
-          {isAdmin ? <><label className="background-button">{backgroundUploading ? 'Envoi de l’image…' : 'Changer l’image de fond'} <span>🖼</span><input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label>{backgroundUrl && <button className="background-reset" onClick={() => void resetBackground()}>Rétablir l’image par défaut</button>}<button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}<button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button><button className="purge-button" onClick={() => void purgeSession()}>Terminer et tout effacer <span>✕</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
+          {isAdmin ? <><label className="background-button">{backgroundUploading ? 'Envoi de l’image…' : 'Changer l’image de fond'} <span>🖼</span><input type="file" accept={BACKGROUND_TYPES.join(',')} disabled={backgroundUploading} onChange={(event) => void uploadBackground(event)} /></label>{backgroundUrl && <button className="background-reset" onClick={() => void resetBackground()}>Rétablir l’image par défaut</button>}<button className="reveal-button" onClick={toggleRevealAll}>{revealAll ? 'Masquer les tickets' : 'Révéler tous les tickets'} <span>{revealAll ? '◉' : '◎'}</span></button>{!voteFinished && <button className={voteOpen ? 'vote-launch-button active' : 'vote-launch-button'} onClick={toggleVote}>{voteOpen ? 'Mettre le vote en pause' : 'Lancer le vote'} <span>{voteOpen ? 'Ⅱ' : '→'}</span></button>}{voteOpen && <button className="finish-vote-button" onClick={finishVote}>Fin du vote <span>✓</span></button>}{voteFinished && <p className="vote-finished-note">Vote terminé. Attribuez chaque ticket à une zone.</p>}{supabase && <><button className="reset-button" onClick={resetSession}>Réinitialiser la rétro <span>↺</span></button><button className="purge-button" onClick={() => void purgeSession()}>Terminer et tout effacer <span>✕</span></button></>}<button className="export-button" onClick={downloadMarkdown}>Télécharger le Markdown <span>↓</span></button></> : <p className="admin-note">🔒 Seul l’animateur peut révéler, lancer ou terminer le vote, ou réinitialiser la rétro.</p>}
         </aside>}
         <section className="board-area">
-          <div className="board-stage"><div className="image-board custom-image" style={{ backgroundImage: `url("${boardImage}")`, '--board-ratio': boardRatio } as CSSProperties} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket}>
+          <div className={`board-stage ${isPanning ? 'is-panning' : ''}`}><div ref={boardRef} className={`image-board custom-image ${isPanning ? 'is-panning' : ''}`} style={{ '--board-ratio': boardRatio } as CSSProperties} onDragOver={(event) => event.preventDefault()} onDrop={moveTicket} onPointerDown={startBoardPan} onPointerMove={panBoard} onPointerUp={stopBoardPan} onPointerCancel={stopBoardPan}>
+            <div className="board-canvas" style={{ backgroundImage: `url("${boardImage}")`, transform: `translate3d(${boardPan.x}px, ${boardPan.y}px, 0) scale(${backgroundZoom})` }}>
             <div className="board-caption"><span>{voteOpen ? 'VOTEZ SUR LES TICKETS' : voteFinished ? 'CLASSEZ LES TICKETS PAR ZONE' : 'ORGANISEZ LES TICKETS SUR L’IMAGE'}</span><small>{isAdmin ? voteOpen ? `Chaque participant dispose de ${votesLabel}. Vous pouvez toujours réorganiser les tickets.` : 'Vous pouvez réorganiser tous les tickets.' : voteOpen ? `Chaque participant dispose de ${votesLabel}.` : voteFinished ? 'Seul l’animateur peut encore déplacer les tickets.' : 'Vous pouvez déplacer uniquement vos tickets.'}</small></div>
             {tickets.map((ticket) => {
               const hidden = ticket.private && ticket.author !== displayName && !revealAll
@@ -883,11 +946,12 @@ function App() {
               const isTopVoted = topVotedIds.has(String(ticket.id))
               const topRank = topVotedTickets.findIndex((item) => item.id === ticket.id) + 1
               const decision = ticketActions[String(ticket.id)] ?? { status: 'none' as const, text: '' }
-              return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''} ${voteFinished && !ticket.inReport ? 'is-excluded' : ''}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color }}>
+              return <div className={`ticket ${hidden ? 'is-hidden' : ''} ${canMove ? 'is-owned' : 'is-locked'} ${voteOpen ? 'vote-phase' : ''} ${voteFinished && !ticket.inReport ? 'is-excluded' : ''}`} draggable={canMove && !isEditing} onDragStart={() => canMove && !isEditing && setDraggedId(ticket.id)} onDragEnd={() => setDraggedId(null)} key={ticket.id} style={{ left: `${ticket.x}%`, top: `${ticket.y}%`, background: ticket.color, scale: ticketScale / (backgroundZoom * backgroundZoom) }}>
                 <div className="ticket-pin" />
                 {hidden ? <><span className="lock">🔒</span><span className="hidden-label">Ticket secret</span></> : isEditing ? <div className="ticket-editor"><textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} maxLength={160} autoFocus /><div><button type="button" onClick={() => saveEdit(ticket)}>Enregistrer</button><button type="button" onClick={() => setEditingTicketId(null)}>Annuler</button></div></div> : <><p>{ticket.text}</p><small>{ticket.author} {isOwner ? '· vous' : canMove ? '· déplaçable' : '· lecture seule'}</small>{canEdit && <button type="button" className="edit-ticket" onClick={() => beginEdit(ticket)}>Modifier</button>}{voteOpen && !hidden && <button type="button" className={hasVoted ? 'ticket-vote voted' : 'ticket-vote'} disabled={!hasVoted && voteTotalFor(displayName) >= maxVotes} onClick={() => voteForTicket(ticket.id)}>{hasVoted ? 'RETIRER LE VOTE' : 'VOTE'} <span>{voters.length}</span></button>}{voteFinished && <small className="vote-result">{voters.length} vote{voters.length > 1 ? 's' : ''} · {voters.length ? voters.join(', ') : 'Aucun vote'}</small>}{voteFinished && isTopVoted && <div className="action-decision"><strong>Priorité #{topRank}</strong>{isAdmin ? <><div className="action-choice"><button type="button" className={decision.status === 'action' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'action' })}>Action</button><button type="button" className={decision.status === 'none' ? 'selected' : ''} onClick={() => updateTicketAction(ticket.id, { ...decision, status: 'none', text: '' })}>Pas d’action</button></div>{decision.status === 'action' && <textarea value={decision.text} onChange={(event) => updateTicketAction(ticket.id, { ...decision, text: event.target.value })} placeholder="Décrire l’action à réaliser..." maxLength={240} />}</> : <small>{decision.status === 'action' ? `Action : ${decision.text || 'À préciser'}` : 'Pas d’action'}</small>}</div>}{voteFinished && isAdmin && <div className="zone-assignment"><span>Zone du ticket</span>{zones.map((zone) => <label key={zone.id}><input type="radio" name={`zone-${ticket.id}`} checked={assignedZone === zone.id} onChange={() => assignTicketZone(ticket.id, zone.id)} />{zone.name}</label>)}</div>}{voteFinished && assignedZone && <small className="assigned-zone">Zone : {zones.find((zone) => zone.id === assignedZone)?.name}</small>}{voteFinished && <label className="report-toggle"><input type="checkbox" checked={ticket.inReport} onChange={() => void toggleTicketReport(ticket)} />Dans le compte rendu</label>}</>}
               </div>
             })}
+            </div>
           </div></div>
           <div className="board-footer"><span><b>{tickets.filter((ticket) => !ticket.private || revealAll).length}</b> tickets visibles sur la carte</span><span>{voteOpen ? 'Votez sur les tickets' : voteFinished ? 'Attribuez les tickets aux zones' : isAdmin ? 'Réorganisez tous les tickets' : 'Déplacez uniquement vos tickets'}</span></div>
         </section>
